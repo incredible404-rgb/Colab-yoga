@@ -11,7 +11,7 @@ exactly as long as it is used. LLM only: no video, image, ComfyUI or Gradio API 
 | Dir | Runs on | What |
 |---|---|---|
 | `console/` | this PC | `Colab-yoga.exe`, Go + MyGo native UI, tray icon |
-| `bridge/` | this PC | `colab_yoga_bridge.py`, run by the bundled Python: Google account, wake, URL recovery, release, the detached keeper |
+| `bridge/` | this PC | `colab_yoga_bridge.py`, run by the bundled Python: Google account, wake, URL and token recovery, release, the detached keeper |
 | `server/` | the Colab VM | `colab_yoga_server.py` (HTTP API + idle watchdog + MCP forwarder), `vm_boot.py` (what wake runs in the VM kernel) |
 | `tools/` | this PC | `install.py`: check, build, lay out the install dir, shortcuts, migration |
 
@@ -40,7 +40,8 @@ wheel hashes pinned; `pip install --target --platform win_amd64 --python-version
 or a `site-packages\` that already matches the lock is left alone. Bumping Python means changing
 the URL and hash in `install.py`; bumping a package means changing `bridge/requirements.txt`.
 
-Config and state: `%LOCALAPPDATA%\Colab-yoga\settings.json`, `keeper.json`. An earlier
+Config and state: `%LOCALAPPDATA%\Colab-yoga\settings.json`, `keeper.json`, `server_token.json` (the
+control token below; per user, never in the repo or a package). An earlier
 install's `%LOCALAPPDATA%\EasyColab\settings.json` and `keeper.json` are copied once, only when
 the new ones do not exist; nothing reads the old directory afterwards.
 
@@ -48,6 +49,36 @@ Runner scripts (with real keys, never committed or packaged): `colab_kernel_runn
 colab-gpu-llm-service's `colab_kernel.py` exports it. Looked up in `<install>\` first, then in
 `%LOCALAPPDATA%\Programs\Colab-yoga\` (which only differs for a package unzipped elsewhere); the
 first that exists wins. Nothing under `Programs\EasyColab` is read.
+
+### The model list
+
+The models are the entries of that file: one per slug, with `alias` (the name llama-server
+reports on `/v1/models`), `title`, `root_dir`, `files[]` (`size` in bytes) and the boot script
+`code`. Both the console and the server build their model list from it; nothing is hard-coded.
+A model the author ships (`qwen38-huihui-v2`, `gemma4-31b`, `qwen38-27b-rvn`, `glm53-flash`)
+additionally gets a curated display name, tags and a note; any other model is shown by its
+alias, with its size summed from `files`. A served alias that is not in the file is shown as
+that alias and is never taken for one of the known models. Without the file the console lists
+no model and says to export it from colab-gpu-llm-service (`colab_kernel.py`); it re-reads the
+file when it changes. The console takes the access address (Tailscale Service host) from the
+`SERVICE_FQDN` in the scripts, else from the first `*.ts.net` host in them; when neither is
+there, fill it in by hand under "Connection & Account" → "Access addresses".
+
+### Control token
+
+The server is reachable from the internet through its gradio.live tunnel, so its control calls
+need `Authorization: Bearer <token>`. `wake` makes a random token (`secrets.token_urlsafe(32)`),
+uploads it to `/content/colab_yoga_token` through the Contents API (not through code sent to the
+kernel, whose history is kept) and stores it in `%LOCALAPPDATA%\Colab-yoga\server_token.json`
+before it prints `WAKE_URL:`. The server reads `COLAB_YOGA_TOKEN`, else that file; with neither
+it makes one and writes the file itself. `discover_url` reads the file back from the VM (the
+same place it reads the URL) and stores it locally without printing it. The token never appears
+in the log, in the status, or in the `COLAB_YOGA_URL` line, and the console and bridge send it
+on every call except `GET /api/status`. There is no exemption for requests from 127.0.0.1: the
+tunnel's forwarder connects from there, so a loopback source proves nothing (the keeper only
+reads `/api/status` inside the VM). A server from before the token ignores the header, so a
+console that sends one keeps working against it. The token stops the URL alone from being
+enough; it is not a defence against the tunnel operator, who relays the traffic.
 
 ### Retired: the EasyColab compatibility layer
 
@@ -61,7 +92,8 @@ removed as links (never recursed into); a directory that is not exactly that lay
 ## VM side
 
 - Files: `/content/colab_yoga_server.py`, its log `/content/colab_yoga_server.log`,
-  `/content/colab_kernel_runners.json`, forwarder `/content/colab_yoga_mcp_bridge.py`.
+  `/content/colab_kernel_runners.json`, the control token `/content/colab_yoga_token`,
+  forwarder `/content/colab_yoga_mcp_bridge.py`.
 - The server listens on `0.0.0.0:7860` and, once its public tunnel is up, prints one line
   `COLAB_YOGA_URL=https://…` to its log. Wake, discover and the keeper find the URL by that line.
 - Wake never kills llama-server :8081 or the MCP forwarder. It kills an older server of either
@@ -69,17 +101,26 @@ removed as links (never recursed into); a directory that is not exactly that lay
 - The Colab session name in `~/.config/colab-cli/sessions.json` is `easycolab`, shared with
   `colab_cli.py` (which also accepts `colab-yoga`). It is an internal identifier, not a path,
   and renaming it would orphan a live runtime's session, so it is kept on purpose.
+- The Google token `~/.config/colab-cli/token.json` and `sessions.json` are shared with
+  colab-gpu-llm-service. `auth_code` therefore clears the session records only when the new
+  authorisation belongs to a different account than the one bound before (compared by email);
+  authorising the same account again leaves the running sessions alone. Check `auth_status`
+  first: when `logged_in` is already true there is nothing to bind.
 
 ## HTTP API (server, JSON)
 
-| Method | Path | Body | |
-|---|---|---|---|
-| GET | `/api/status` | | status below |
-| POST | `/api/load_model` | `{model_id, context_length, hf_token}` | start the colab_kernel runner (replaces what runs on :8081); returns status |
-| POST | `/api/unload_model` | `{model_id}` | stop :8081; returns status |
-| POST | `/api/touch` | `{}` | reset the idle countdown; returns status |
-| POST | `/api/config_idle` | `{idle_timeout_minutes}` | 0 = off; returns status |
-| POST | `/api/disconnect` | `{}` | release this runtime now |
+Every call except `GET /api/status` needs `Authorization: Bearer <token>` (see "Control token"
+above); without it the answer is 401. `/api/status` stays open so the keeper and a quick check
+need nothing.
+
+| Method | Path | Auth | Body | |
+|---|---|---|---|---|
+| GET | `/api/status` | none | | status below |
+| POST | `/api/load_model` | Bearer | `{model_id, context_length, hf_token}` | start the runner of `model_id` (a slug in the runners file; required, 400 without it); replaces what runs on :8081; returns status |
+| POST | `/api/unload_model` | Bearer | `{model_id}` | stop :8081; returns status |
+| POST | `/api/touch` | Bearer | `{}` | reset the idle countdown; returns status |
+| POST | `/api/config_idle` | Bearer | `{idle_timeout_minutes}` | 0 turns the automatic release off, so the runtime bills until someone releases it; returns status |
+| POST | `/api/disconnect` | Bearer | `{}` | release this runtime now |
 
 Status fields (the console's `Status` struct reads exactly these): `server_version`,
 `gpu_name`, `vram_used_gb`, `vram_total_gb`, `ram_used_gb`, `ram_total_gb`, `disk_used_gb`,
@@ -88,7 +129,9 @@ Status fields (the console's `Status` struct reads exactly these): `server_versi
 (-1 when off), `loaded_model_ids`, `is_downloading`, `is_loading_vram`, `task_progress`,
 `task_message`, `console_lines`, `context_length`, `llm_server` = `{online, alias, model_id,
 slots_total, slots_busy, n_ctx_per_slot, tokens_seen, last_active_age_s, mcp_bridge:
-{listening, owner, reachable, error, checked_age_s}}`.
+{listening, owner, reachable, error, checked_age_s}}`. `llm_server.model_id` is the runner slug
+whose `alias` llama-server reports, `""` when that alias is not in the runners file;
+`loaded_model_ids` then lists the alias instead.
 
 What `/api/status` costs: GPU/RAM/disk telemetry and the :8081 identity probe are cached for
 about 2 s and shared by concurrent polls (one computation, not one per request); the GPU is
@@ -102,6 +145,10 @@ until it is restarted.
 
 ## Liveness
 
+- Who starts the keeper: the console (when it sees a billing runtime without a live keeper) and
+  `wake` itself (after the server is up, before it prints `WAKE_URL:`, unless `keeper.json` says
+  one is alive), so a command-line-only `wake` is kept alive too. Both start
+  `<app>\runtime\pythonw.exe -X utf8 <bridge> keeper` detached.
 - The keeper (`colab_yoga_bridge.py keeper`, detached pythonw) runs one short kernel
   execution every 30 s, which is what stops Colab reclaiming a CLI runtime after 21–35 min.
   In that execution it reads `/api/status` inside the VM; at `idle_remaining_seconds == 0` it

@@ -7,7 +7,7 @@ Builds the console executable, prepares the bundled Python runtime and its packa
 directory, migrates the old settings once, retires the old EasyColab compatibility layer
 if one is found, manages Windows shortcuts, and closes/restarts the console GUI.
 
-Run it with a Python that has pip (python.org 3.12 recommended); that Python only runs this
+Run it with a Python 3.10+ that has pip (python.org); that Python only runs this
 script and pip. The installed app runs on its own runtime\\python.exe.
 
 Usage:
@@ -302,7 +302,7 @@ def ensure_site_packages(paths: InstallPaths, dry_run: bool, before_replace=None
     if pip_py is None:
         raise RuntimeError(
             "site-packages needs installing but no Python with pip was found. Run this script "
-            "with python.org Python (3.12 recommended, e.g. 'py -3.12 tools/install.py') or put one on PATH."
+            "with a Python 3.10+ that has pip (e.g. 'py -3 tools/install.py') or put one on PATH."
         )
     staging = paths.target_install / "site-packages.new"
     if staging.exists():

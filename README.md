@@ -12,7 +12,7 @@
 |---|---|
 | ![深色模式仪表盘](docs/dashboard-dark.png) | ![浅色模式仪表盘](docs/dashboard-light.png) |
 
-模型本身（colab_kernel 启动脚本、模型清单、中文思考补丁、小说 MCP 服务）在 colab-gpu-llm-service 项目里，不在这个仓库。
+模型本身（colab_kernel 启动脚本、模型清单、中文思考补丁、小说 MCP 服务）在 colab-gpu-llm-service 项目里，不在这个仓库。管理台的模型列表就是导出的 `colab_kernel_runners.json` 里有什么就列什么，自己加的模型也会出现。
 
 ## 组成
 
@@ -34,16 +34,16 @@
 1. 在 [Releases](https://github.com/incredible404-rgb/Colab-yoga/releases) 下载 `Colab-yoga-<版本>-windows-amd64.zip`（旁边有 `.sha256`）。
 2. 解压到任意位置，运行里面的 `Colab-yoga.exe`。不需要另外安装 Python；整个文件夹可以整体移动，但不要把 exe 单独拿出去。
 3. 设置和状态保存在 `%LOCALAPPDATA%\Colab-yoga`，不在解压目录里。免安装包不建快捷方式、不写注册表，删掉文件夹即卸载。
-4. 要启动模型，需要把 `colab_kernel_runners.json`（colab-gpu-llm-service 的 `colab_kernel.py` 导出，含 API 密钥）放在 `Colab-yoga.exe` 旁边。包里不带这个文件。
+4. 要看到并切换模型，需要把 `colab_kernel_runners.json`（colab-gpu-llm-service 的 `colab_kernel.py` 导出，含 API 密钥）放在 `Colab-yoga.exe` 旁边。包里不带这个文件；没有它，管理台的模型列表是空的，并提示去导出。
 
 ### 方式二：从源码安装
 
-前置：Windows 10/11 x64；[Go](https://go.dev/dl/) 1.27+；[PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows)（`pwsh`，建快捷方式和管理进程用）；[python.org](https://www.python.org/downloads/windows/) 的 Python 3.12（要带 pip，只用来跑安装脚本和 pip）。
+前置：Windows 10/11 x64；[Go](https://go.dev/dl/) 1.27+；[PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows)（`pwsh`，建快捷方式和管理进程用）；[python.org](https://www.python.org/downloads/windows/) 的 Python 3.10 或更新（要带 pip，只用来跑安装脚本和 pip；管理台运行时用的 3.12 由安装脚本另外下载）。
 
 ```bash
 git clone https://github.com/incredible404-rgb/Colab-yoga.git
 cd Colab-yoga
-py -3.12 tools/install.py
+py -3 tools/install.py
 ```
 
 这一条命令会：
@@ -60,7 +60,7 @@ py -3.12 tools/install.py
 ### 自己打免安装包
 
 ```bash
-py -3.12 tools/package.py --out <仓库之外的目录>
+py -3 tools/package.py --out <仓库之外的目录>
 ```
 
 按安装同样的流程在临时目录里组好，压成 `Colab-yoga-<版本>-windows-amd64.zip`（同目录有 `.sha256`），并审计内容：不含 `colab_kernel_runners.json`、`settings.json`、`keeper.json`、token 或凭据类文件、`.pyc`、密钥特征字符串，发现就删掉 zip 并报错。
@@ -73,18 +73,19 @@ py -3.12 tools/package.py --out <仓库之外的目录>
 
 - 开始菜单或桌面上的「Colab-yoga」。只会运行一个实例：再次打开时，会把已在运行的窗口调出来。
 - 关窗口会缩到托盘，GPU 不受影响。托盘图标的提示里显示是否在计费和当前余额；右键菜单可以打开网页对话、续时、释放（会先打开窗口确认）、退出。
-- 第一次使用：在「连接与账号」页绑定 Google 账号。点「绑定」后会打开浏览器，授权后把页面上的授权码粘贴回来。
-- 实例保活由独立的 keeper 进程负责，关掉或退出管理台都不影响。云端看门狗把网页、Magpie、MCP 里的对话都算作在用，闲置到设定时间（默认 30 分钟）才会释放实例；剩 5 分钟时会弹系统通知。
+- 第一次使用：在「连接与账号」页绑定 Google 账号。点「绑定」后会打开浏览器，授权后把页面上的授权码粘贴回来。令牌与 colab-gpu-llm-service 共用（`~/.config/colab-cli/token.json`），已经绑定过就不用再绑；同一个账号重新授权不会动正在运行的会话。
+- 接入地址（Tailscale Service 域名）会从模型清单的脚本里自动识别（先找 `SERVICE_FQDN`，再找任意 `*.ts.net` 域名）；识别不到就在「连接与账号 → 接入地址」里手填。
+- 实例保活由独立的 keeper 进程负责，关掉或退出管理台都不影响；只用命令行 `bridge wake` 唤醒时，wake 成功后也会自己把 keeper 拉起来。服务端的控制接口（加载、卸载、改闲置时间、释放）要带随机生成的 Bearer 令牌，由唤醒时下发并保存在 `%LOCALAPPDATA%\Colab-yoga\server_token.json`，只有 `GET /api/status` 不需要。云端看门狗把网页、Magpie、MCP 里的对话都算作在用，闲置到设定时间（默认 30 分钟）才会释放实例；剩 5 分钟时会弹系统通知。
 
 ## 开发
 
-源码放在哪里都行（本机的开发副本在 `%LOCALAPPDATA%\Programs\Colab-yoga\repo`）。需要 Go 1.27+（MyGo CLI 已在 `console/go.mod` 里固定版本）。
+源码放在哪里都行。需要 Go 1.27+（MyGo CLI 已在 `console/go.mod` 里固定版本）。
 
 ```bash
 # 全部检查：AST、go vet、go test、bridge 和 server 的单测（运行时、依赖和 server 测试的 venv 第一次会自动准备）
-py -3.12 tools/install.py --check
+py -3 tools/install.py --check
 # 检查、构建、安装到本机，并重新打开正在运行的管理台
-py -3.12 tools/install.py
+py -3 tools/install.py
 ```
 
 装好之后，也可以直接用安装目录里的运行时跑：`runtime/python.exe -X utf8 tools/install.py`（它自己没有 pip，只在依赖已经就位时可用）。

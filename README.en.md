@@ -12,7 +12,7 @@ Run your own large language models on paid Google Colab GPUs (default: G4 · RTX
 |---|---|
 | ![Dark dashboard](docs/dashboard-dark.png) | ![Light dashboard](docs/dashboard-light.png) |
 
-The model runtime itself (`colab_kernel` startup script, model catalog, Chinese thinking-template patches, and novel MCP service) lives in the `colab-gpu-llm-service` repository, not here.
+The model runtime itself (`colab_kernel` startup script, model catalog, Chinese thinking-template patches, and novel MCP service) lives in the `colab-gpu-llm-service` repository, not here. The console's model list is whatever the exported `colab_kernel_runners.json` holds, so models you add yourself show up too.
 
 ## Components
 
@@ -34,16 +34,16 @@ Two ways, and neither depends on another application's install directory: Colab-
 1. Download `Colab-yoga-<version>-windows-amd64.zip` (with its `.sha256` next to it) from [Releases](https://github.com/incredible404-rgb/Colab-yoga/releases).
 2. Unzip it anywhere and run `Colab-yoga.exe`. No separate Python install is needed. The whole folder can be moved as a unit; do not take the exe out of it.
 3. Settings and state live in `%LOCALAPPDATA%\Colab-yoga`, not in the unzipped folder. The package creates no shortcuts and writes nothing to the registry; delete the folder to uninstall.
-4. To start models, put `colab_kernel_runners.json` (exported by colab-gpu-llm-service's `colab_kernel.py`, contains API keys) next to `Colab-yoga.exe`. The package does not ship it.
+4. To see and switch models, put `colab_kernel_runners.json` (exported by colab-gpu-llm-service's `colab_kernel.py`, contains API keys) next to `Colab-yoga.exe`. The package does not ship it; without it the console's model list is empty and says where to export it from.
 
 ### Option 2: install from source
 
-Prerequisites: Windows 10/11 x64; [Go](https://go.dev/dl/) 1.27+; [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows) (`pwsh`, used for shortcuts and process handling); and [python.org](https://www.python.org/downloads/windows/) Python 3.12 with pip (it only runs the installer and pip).
+Prerequisites: Windows 10/11 x64; [Go](https://go.dev/dl/) 1.27+; [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows) (`pwsh`, used for shortcuts and process handling); and [python.org](https://www.python.org/downloads/windows/) Python 3.10 or newer with pip (it only runs the installer and pip; the 3.12 the console runs on is downloaded by the installer).
 
 ```bash
 git clone https://github.com/incredible404-rgb/Colab-yoga.git
 cd Colab-yoga
-py -3.12 tools/install.py
+py -3 tools/install.py
 ```
 
 That one command:
@@ -60,7 +60,7 @@ When moving over from the earlier EasyColab, the installer once copies the old `
 ### Build the portable package yourself
 
 ```bash
-py -3.12 tools/package.py --out <a directory outside the repo>
+py -3 tools/package.py --out <a directory outside the repo>
 ```
 
 It stages the package the same way an install does, in a temporary directory, zips it to `Colab-yoga-<version>-windows-amd64.zip` (plus a `.sha256`), and audits the result: no `colab_kernel_runners.json`, `settings.json`, `keeper.json`, token or credential files, `.pyc` files, or key-shaped strings. If anything turns up, the zip is deleted and the build fails.
@@ -73,18 +73,19 @@ It stages the package the same way an install does, in a temporary directory, zi
 
 - Launch **Colab-yoga** from the Start menu or desktop shortcut. Only a single instance runs: launching it again brings the existing window to the front.
 - Closing the window hides it to the system tray without affecting the GPU. The tray tooltip shows billing status and current CU balance; the right-click menu provides shortcuts to open web chat, extend time, release the GPU (opens a confirmation prompt first), and quit.
-- First-time setup: bind your Google account on the **Connection & Account** page. Clicking **Bind** opens your browser; after authorizing, paste the authorization code back into the console.
-- Instance keepalive is handled by an independent `keeper` process, so closing or exiting the console does not interrupt a running GPU. The cloud watchdog counts activity across web chat, Magpie, and MCP as active usage, releasing the instance only after the configured idle timeout (default: 30 minutes), with a system notification 5 minutes before release.
+- First-time setup: bind your Google account on the **Connection & Account** page. Clicking **Bind** opens your browser; after authorizing, paste the authorization code back into the console. The token is shared with colab-gpu-llm-service (`~/.config/colab-cli/token.json`), so if an account is already bound there is nothing to bind; authorizing the same account again leaves the running sessions alone.
+- The access address (the Tailscale Service host) is picked up from the scripts in the model list file (`SERVICE_FQDN` first, then any `*.ts.net` host). If it cannot be recognized, enter it by hand under **Connection & Account → Access addresses**.
+- Instance keepalive is handled by an independent `keeper` process, so closing or exiting the console does not interrupt a running GPU; a command-line `bridge wake` also starts the keeper itself once the server is up. The server's control calls (load, unload, idle timer, release) need a random Bearer token that wake delivers and stores in `%LOCALAPPDATA%\Colab-yoga\server_token.json`; only `GET /api/status` is open. The cloud watchdog counts activity across web chat, Magpie, and MCP as active usage, releasing the instance only after the configured idle timeout (default: 30 minutes), with a system notification 5 minutes before release.
 
 ## Development
 
-The source can live anywhere (the working copy on the maintainer's PC is `%LOCALAPPDATA%\Programs\Colab-yoga\repo`). Requires Go 1.27+ (the MyGo CLI version is pinned in `console/go.mod`).
+The source can live anywhere. Requires Go 1.27+ (the MyGo CLI version is pinned in `console/go.mod`).
 
 ```bash
 # Run all checks: AST, go vet, go test, and unit tests for bridge and server (prepares the runtime, dependencies and the server test venv on first run)
-py -3.12 tools/install.py --check
+py -3 tools/install.py --check
 # Check, build, install locally, and reopen the running console
-py -3.12 tools/install.py
+py -3 tools/install.py
 ```
 
 Once installed you can also run the installer with the bundled runtime: `runtime/python.exe -X utf8 tools/install.py` (it has no pip of its own, so this only works while the dependencies are already in place).
