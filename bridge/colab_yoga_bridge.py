@@ -342,6 +342,15 @@ def cmd_auth_status():
 
         if email is None:
             email = _get_account_email()
+        # The keeper records the ledger every LEDGER_POLL_S while a runtime runs. This covers the
+        # zero-assignment balance (the next session's start) and a runtime with no live keeper.
+        try:
+            stale = time.time() - float(ledger_load().get("checked_ts") or 0) > 3 * LEDGER_POLL_S
+        except (TypeError, ValueError):
+            stale = True
+        if int(info.assignments_count) <= 0 or stale:
+            ledger_record(info.paid_compute_units_balance, info.assignments_count, info.consumption_rate_hourly,
+                          assignments[0].endpoint if assignments else "")
         print(json.dumps({
             "ok": True,
             "logged_in": True,
@@ -414,6 +423,7 @@ def cmd_stop_all():
             pass
 
         info = state.client.get_consumption_user_info()
+        ledger_record(info.paid_compute_units_balance, info.assignments_count, info.consumption_rate_hourly)
         print(json.dumps({
             "ok": True,
             "stopped_count": stopped_count,
@@ -484,6 +494,7 @@ def _allocate_fresh_session(session_name: str, gpu_type: str) -> SessionState:
     shape = None if accel in SINGLE_SHAPE_GPUS else resolve_assign_shape(accel, high_mem=True)
     gpu_desc = "G4 (RTX PRO 6000 · 96GB)" if accel == Accelerator.G4 else accel.value
     print(f"WAKE_LOG: 🚀 正在向 Google Colab 申请分配 {gpu_desc} 实例...", flush=True)
+    ledger_poll()  # the balance right before billing starts: this session's exact starting point
     try:
         res = state.client.assign(_new_uuid(), variant=Variant.GPU, accelerator=accel, shape=shape)
     except ColabRequestError as req_err:
@@ -975,6 +986,129 @@ def _keeper_save(st: dict) -> None:
     os.replace(tmp, path)
 
 
+# ─── Official ledger (what the account was actually charged) ──────────────────
+# Colab settles the CU balance about every 5 minutes, each step roughly the advertised
+# consumptionRateHourly times the time since the previous one. The keeper reads it every
+# LEDGER_POLL_S and ledger.json keeps the readings where the balance dropped, so the console
+# shows what was really deducted and a rate measured from those drops, not uptime x price.
+LEDGER_POLL_S = 15
+LEDGER_POINTS_MAX = 60
+# The balance only moves while something is assigned, so the last zero-assignment reading is the
+# session's starting balance. Older than this, a session nobody watched may have run in between.
+LEDGER_PRE_MAX_AGE_S = 2 * 3600
+_LEDGER_EPS = 1e-6
+
+
+def ledger_state_path() -> str:
+    return os.path.join(_colab_yoga_config_dir(), "ledger.json")
+
+
+def ledger_load() -> dict:
+    try:
+        with open(ledger_state_path(), "r", encoding="utf-8") as f:
+            led = json.load(f)
+        return led if isinstance(led, dict) else {}
+    except Exception:
+        return {}
+
+
+def _ledger_save(led: dict) -> None:
+    path = ledger_state_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(led, f, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def _is_num(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def ledger_observe(led: dict, now: float, balance: float, active: int, official_rate: float,
+                   endpoint: str = "") -> dict:
+    """Fold one official ledger reading into led and return it.
+
+    A session is a stretch of readings with active > 0. Its start_balance is the last
+    zero-assignment balance when that was read within LEDGER_PRE_MAX_AGE_S (exact), else the
+    session's first reading (not exact: whatever was charged before it is unknown). points are
+    [ts, balance] for every reading where the balance dropped, i.e. observed settlements. A
+    rise is a top-up or refund, not a charge: it moves start_balance up by the same amount and
+    restarts the points so no measured rate spans it."""
+    led = dict(led or {})
+    prev = led.get("balance")
+    sess = dict(led["session"]) if isinstance(led.get("session"), dict) else None
+    if active <= 0:
+        led["idle_balance"], led["idle_ts"] = balance, now
+        if sess and not sess.get("ended_ts"):
+            if _is_num(prev) and balance < prev - _LEDGER_EPS:
+                sess["points"] = (list(sess.get("points") or []) + [[now, balance]])[-LEDGER_POINTS_MAX:]
+            sess["ended_ts"] = now
+            led["session"] = sess
+    else:
+        if sess is None or sess.get("ended_ts"):
+            pre, pre_ts = led.get("idle_balance"), led.get("idle_ts")
+            exact = (_is_num(pre) and _is_num(pre_ts) and 0 <= now - pre_ts <= LEDGER_PRE_MAX_AGE_S
+                     and pre >= balance - _LEDGER_EPS)
+            sess = {"start_balance": pre if exact else balance, "start_ts": now, "exact": bool(exact),
+                    "points": [], "endpoint": endpoint}
+        else:
+            points = list(sess.get("points") or [])
+            if _is_num(prev) and balance < prev - _LEDGER_EPS:
+                points.append([now, balance])
+            elif _is_num(prev) and balance > prev + _LEDGER_EPS:
+                sess["start_balance"] = float(sess.get("start_balance") or 0) + (balance - prev)
+                points = []
+            sess["points"] = points[-LEDGER_POINTS_MAX:]
+            if endpoint and not sess.get("endpoint"):
+                sess["endpoint"] = endpoint
+        sess["official_rate"] = official_rate
+        led["session"] = sess
+    led.update(balance=balance, checked_ts=now, active=int(active), official_rate=official_rate,
+               poll_s=LEDGER_POLL_S)
+    return led
+
+
+def ledger_record(balance: float, active: int, official_rate: float, endpoint: str = "",
+                  now: float = None):
+    """Fold a reading into ledger.json. Never raises: auth_status and stop_all call it, and a
+    bookkeeping problem must not turn their answers into errors. A file that cannot be folded
+    into (hand-edited, half-written by an old build) is started over."""
+    try:
+        args = (time.time() if now is None else now, float(balance), int(active), float(official_rate), endpoint)
+        try:
+            led = ledger_observe(ledger_load(), *args)
+        except Exception:
+            led = ledger_observe({}, *args)
+        _ledger_save(led)
+        return led
+    except Exception:
+        return None
+
+
+def ledger_poll(endpoint: str = ""):
+    """One ccu-info read folded into ledger.json; None when the read failed."""
+    try:
+        info = state.client.get_consumption_user_info()
+        return ledger_record(info.paid_compute_units_balance, info.assignments_count,
+                             info.consumption_rate_hourly, endpoint)
+    except Exception:
+        return None
+
+
+def _keeper_wait(until: float, endpoint: str, next_ledger: float) -> float:
+    """Sleep until `until`, reading the ledger whenever next_ledger comes due; returns the
+    next due time so the cadence carries across beats."""
+    while True:
+        if time.time() >= next_ledger:
+            ledger_poll(endpoint)
+            next_ledger = time.time() + LEDGER_POLL_S
+        now = time.time()
+        if now >= until:
+            return next_ledger
+        time.sleep(max(0.05, min(until, next_ledger) - now))
+
+
 def _track_a_covers(endpoint: str) -> bool:
     """colab-gpu-llm-service's own keep-alive daemon already beats this runtime."""
     import glob
@@ -1083,6 +1217,7 @@ def cmd_keeper():
     start = time.time()
     last_server_ok = start
     last_assign_check = 0.0
+    next_ledger = 0.0
     sess = None
     try:
         while True:
@@ -1108,7 +1243,7 @@ def cmd_keeper():
                     state.store.add(sess)
                     st["endpoint"] = sess.endpoint
             if sess is None:
-                time.sleep(KEEPER_BEAT_S)
+                next_ledger = _keeper_wait(time.time() + KEEPER_BEAT_S, "", next_ledger)
                 continue
 
             vm = None
@@ -1144,10 +1279,13 @@ def cmd_keeper():
                 st["exit_reason"] = "server_unreachable"
                 break
             _keeper_save(st)
-            time.sleep(max(1.0, KEEPER_BEAT_S - (time.time() - cycle)))
+            next_ledger = _keeper_wait(time.time() + max(1.0, KEEPER_BEAT_S - (time.time() - cycle)),
+                                       sess.endpoint, next_ledger)
     except Exception as e:
         st["exit_reason"] = f"crash {str(e)[:160]}"
     finally:
+        if st.get("exit_reason") in ("idle_release", "no_assignment"):
+            ledger_poll(st.get("endpoint") or "")  # the release settlement, and the session's end
         st["ended"] = time.time()
         st["exit_reason"] = st.get("exit_reason") or "loop_ended"
         _keeper_save(st)

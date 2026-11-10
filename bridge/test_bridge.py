@@ -32,6 +32,10 @@ except ImportError:
 
 import colab_yoga_bridge as cb
 
+# No test may touch the real %LOCALAPPDATA%\Colab-yoga\ledger.json; tests that read it patch their own.
+_LEDGER_SANDBOX = Path(tempfile.mkdtemp()) / "ledger.json"
+cb.ledger_state_path = lambda: str(_LEDGER_SANDBOX)
+
 
 class WakeReuseTests(unittest.TestCase):
     """
@@ -933,6 +937,195 @@ class AuthCodeSessionStoreTests(unittest.TestCase):
         self.assertEqual(sorted(self.store), ["live", "stale"])
         self.assertEqual(self.cleared, 0)
         self.assertFalse((self.tmp / "profile.json").exists())  # and the cache is renewed after
+
+
+class LedgerTests(unittest.TestCase):
+    """ledger.json: settlements as observed in the official balance, per billing session."""
+
+    def setUp(self) -> None:
+        self.path = Path(tempfile.mkdtemp()) / "ledger.json"
+        self._orig = cb.ledger_state_path
+        cb.ledger_state_path = lambda: str(self.path)
+
+    def tearDown(self) -> None:
+        cb.ledger_state_path = self._orig
+
+    def _feed(self, readings):
+        led = {}
+        for now, bal, active in readings:
+            led = cb.ledger_observe(led, now, bal, active, 10.05, "vm1" if active else "")
+        return led
+
+    def test_session_starts_from_the_idle_balance_and_keeps_only_drops(self) -> None:
+        led = self._feed([(0, 100.0, 0), (60, 100.0, 1), (75, 100.0, 1), (300, 99.6, 1), (315, 99.6, 1),
+                          (600, 98.76, 1)])
+        s = led["session"]
+        self.assertTrue(s["exact"])
+        self.assertEqual(s["start_balance"], 100.0)
+        self.assertEqual(s["points"], [[300, 99.6], [600, 98.76]])
+        self.assertEqual((led["balance"], led["active"], led["official_rate"]), (98.76, 1, 10.05))
+
+    def test_settlement_before_the_first_reading_still_counts_when_the_idle_balance_is_known(self) -> None:
+        led = self._feed([(0, 100.0, 0), (400, 99.2, 1)])
+        self.assertTrue(led["session"]["exact"])
+        self.assertEqual(led["session"]["start_balance"], 100.0)
+
+    def test_unknown_or_stale_idle_balance_starts_from_the_first_reading(self) -> None:
+        self.assertFalse(self._feed([(10, 99.0, 1)])["session"]["exact"])
+        led = self._feed([(0, 100.0, 0), (cb.LEDGER_PRE_MAX_AGE_S + 1, 99.0, 1)])
+        self.assertFalse(led["session"]["exact"])
+        self.assertEqual(led["session"]["start_balance"], 99.0)
+
+    def test_top_up_is_not_a_charge(self) -> None:
+        led = self._feed([(0, 100.0, 0), (300, 99.2, 1), (600, 98.4, 1), (700, 198.4, 1), (900, 197.6, 1)])
+        s = led["session"]
+        self.assertAlmostEqual(s["start_balance"] - led["balance"], 2.4)
+        self.assertEqual(s["points"], [[900, 197.6]])
+
+    def test_release_ends_the_session_and_the_next_one_starts_fresh(self) -> None:
+        led = self._feed([(0, 100.0, 0), (300, 99.2, 1), (450, 98.9, 0), (500, 98.9, 0), (600, 98.9, 1)])
+        s = led["session"]
+        self.assertNotIn("ended_ts", s)
+        self.assertEqual((s["start_balance"], s["points"], s["exact"]), (98.9, [], True))
+        ended = self._feed([(0, 100.0, 0), (300, 99.2, 1), (450, 98.9, 0)])["session"]
+        self.assertEqual((ended["ended_ts"], ended["points"][-1]), (450, [450, 98.9]))
+
+    def test_points_are_capped(self) -> None:
+        led = self._feed([(0, 1000.0, 0)] + [(i * 300, 1000.0 - i, 1) for i in range(1, 100)])
+        self.assertEqual(len(led["session"]["points"]), cb.LEDGER_POINTS_MAX)
+
+    def test_record_writes_and_poll_survives_a_failed_read(self) -> None:
+        cb.ledger_record(50.0, 0, 0.0, now=1.0)
+        cb.ledger_record(49.5, 1, 10.05, "vm1", now=2.0)
+        on_disk = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(on_disk["session"]["start_balance"], 50.0)
+        saved = cb.state
+        try:
+            cb.state = types.SimpleNamespace(client=types.SimpleNamespace(
+                get_consumption_user_info=lambda: (_ for _ in ()).throw(RuntimeError("offline"))))
+            self.assertIsNone(cb.ledger_poll("vm1"))
+        finally:
+            cb.state = saved
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8")), on_disk)
+
+
+class KeeperLedgerTests(unittest.TestCase):
+    """The keeper reads the ledger every LEDGER_POLL_S between its 30 s beats, and once after release."""
+
+    def setUp(self) -> None:
+        self._saved = {}
+        self.tmp = Path(tempfile.mkdtemp())
+        self.now = 1_000_000.0
+        self.reads = []
+        self.beats = 0
+
+        def patch(obj, name, val):
+            self._saved[(obj, name)] = getattr(obj, name)
+            setattr(obj, name, val)
+
+        def sleep(sec):
+            self.now += sec
+
+        def info():
+            self.reads.append(self.now)
+            active = 0 if self.beats >= 40 else 1
+            # a settlement every 300 s at 10.05 CU/h
+            bal = 500.0 - int((self.now - 1_000_000.0) // 300) * 10.05 / 12
+            return types.SimpleNamespace(paid_compute_units_balance=bal, consumption_rate_hourly=10.05 if active else 0,
+                                         assignments_count=active)
+
+        proxy = types.SimpleNamespace(token="t", url="u", expires_at=lambda: None)
+        assign = types.SimpleNamespace(endpoint="vm1", runtime_proxy_info=proxy)
+        sess = types.SimpleNamespace(name="easycolab", endpoint="vm1", token="", url="", token_expires_at=None)
+
+        def exec_on(s, code, timeout=40):
+            self.beats += 1
+            payload = {"app_alive": True, "idle_remaining": 0 if self.beats >= 40 else 900, "idle_timeout": 30}
+            return [{"text": "EC_KEEPER:" + json.dumps(payload)}]
+
+        patch(cb, "keeper_state_path", lambda: str(self.tmp / "keeper.json"))
+        patch(cb, "ledger_state_path", lambda: str(self.tmp / "ledger.json"))
+        patch(cb, "_has_valid_token", lambda: True)
+        patch(cb, "_safe_sync_sessions", lambda with_status=False: ({"easycolab": sess}, [assign], True))
+        patch(cb, "_track_a_covers", lambda endpoint: False)
+        patch(cb, "_exec_on_session", exec_on)
+        patch(cb, "_tfe_keep_alive", lambda endpoint: None)
+        patch(cb, "state", types.SimpleNamespace(
+            store=types.SimpleNamespace(add=lambda s: None),
+            client=types.SimpleNamespace(get_consumption_user_info=info, unassign=lambda ep: None),
+            prune_session=lambda name: None))
+        patch(cb.time, "time", lambda: self.now)
+        patch(cb.time, "sleep", sleep)
+
+    def tearDown(self) -> None:
+        for (obj, name), val in self._saved.items():
+            setattr(obj, name, val)
+
+    def test_reads_every_15_s_and_closes_the_session_after_release(self) -> None:
+        cb.ledger_record(500.0, 0, 0.0, now=self.now - 5)
+        cb.cmd_keeper()
+        st = json.loads((self.tmp / "keeper.json").read_text(encoding="utf-8"))
+        self.assertEqual(st["exit_reason"], "idle_release")
+        gaps = [b - a for a, b in zip(self.reads, self.reads[1:-1])]
+        self.assertTrue(gaps and all(abs(g - cb.LEDGER_POLL_S) < 1.0 for g in gaps), gaps[:8])
+        led = json.loads((self.tmp / "ledger.json").read_text(encoding="utf-8"))
+        s = led["session"]
+        self.assertTrue(s["exact"])
+        self.assertIn("ended_ts", s)
+        self.assertEqual(led["active"], 0)
+        drops = [p[0] for p in s["points"]]
+        self.assertGreaterEqual(len(drops), 3)
+        # each settlement is seen within one poll of when it happened
+        self.assertTrue(all((t - 1_000_000.0) % 300 < cb.LEDGER_POLL_S + 1 for t in drops), drops)
+
+
+class AuthStatusLedgerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.path = Path(tempfile.mkdtemp()) / "ledger.json"
+        self._saved = {}
+        self.active = 0
+
+        def patch(obj, name, val):
+            self._saved[(obj, name)] = getattr(obj, name)
+            setattr(obj, name, val)
+
+        info = lambda: types.SimpleNamespace(paid_compute_units_balance=80.0, consumption_rate_hourly=0.0,
+                                             assignments_count=self.active)
+        patch(cb, "ledger_state_path", lambda: str(self.path))
+        patch(cb, "state", types.SimpleNamespace(client=types.SimpleNamespace(get_consumption_user_info=info)))
+        patch(cb, "_has_valid_token", lambda: True)
+        patch(cb, "_safe_sync_sessions", lambda: ({}, []))
+        patch(cb, "_get_account_email", lambda: "me@example.com")
+
+    def tearDown(self) -> None:
+        for (obj, name), val in self._saved.items():
+            setattr(obj, name, val)
+
+    def _status(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            cb.cmd_auth_status()
+
+    def test_zero_assignments_record_the_next_sessions_start(self) -> None:
+        self._status()
+        led = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual((led["idle_balance"], led["active"]), (80.0, 0))
+
+    def test_a_corrupt_ledger_neither_breaks_the_status_nor_stays_corrupt(self) -> None:
+        self.path.write_text(json.dumps({"checked_ts": "soon", "balance": "x",
+                                         "session": {"start_balance": "?", "points": 3}}), encoding="utf-8")
+        self.active = 1
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cb.cmd_auth_status()
+        self.assertTrue(json.loads(out.getvalue())["ok"])
+        led = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual((led["balance"], led["active"], led["session"]["start_balance"]), (80.0, 1, 80.0))
+
+    def test_a_fresh_keeper_reading_is_left_alone_while_billing(self) -> None:
+        cb.ledger_record(81.0, 1, 10.05, "vm1")
+        self.active = 1
+        self._status()
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8"))["balance"], 81.0)
 
 
 if __name__ == "__main__":

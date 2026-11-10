@@ -69,7 +69,8 @@ func (a *App) topBar(c *ui.Context, p Palette) {
 		ui.Text(c, text).SingleLine().Grow(1).Shrink(1).MinWidth(60).TextColor(p.Text2).Tooltip(text).
 			ContentTransition(morph)
 		if a.acct.Known && a.acct.LoggedIn {
-			money := ui.Text(c, fmt.Sprintf("余额 %s CU · %.2f CU/h", thousands(a.acct.Balance), a.acct.Burn)).
+			rate, _, _ := a.burnRate(a.now())
+			money := ui.Text(c, fmt.Sprintf("余额 %s CU · %.2f CU/h", thousands(a.balance()), rate)).
 				Font(fontMono).FontFeatures("tnum").FontSize(13).NoWrap().ContentTransition(numericDown)
 			money.TextColor(money.AnimateColor("c", map[bool]ui.Color{true: p.Accent, false: p.Text2}[a.acct.Burn > 0], fadeColor))
 		}

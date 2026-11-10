@@ -51,6 +51,10 @@ With the server URL, the runtime answers JSON over HTTP: `GET /api/status` (GPU,
 
 A detached keeper (`colab_yoga_bridge.py keeper`) keeps the runtime alive with a short kernel execution every 30 s and releases it once the server's idle countdown reaches zero; closing the console does not stop it. Both the console and `wake` start it. Chats from the web UI, Magpie and MCP count as use. If the user says a runtime vanished, check `auth_status` then the keeper state in `%LOCALAPPDATA%\Colab-yoga\keeper.json` (`exit_reason`).
 
+## What a session actually cost
+
+Colab deducts about every 5 minutes, so the balance moves in steps. While a runtime runs, the keeper records each step in `%LOCALAPPDATA%\Colab-yoga\ledger.json`: `session.start_balance` minus `balance` is what this session has been charged (`session.exact` false means the balance before it started was not seen, so the real figure is at least that), and `session.points` are `[unix time, balance]` per step. A rate is only meaningful across three or more steps. Quote these, not `session_cu_used` (an uptime × price estimate).
+
 ## Verify
 
 After any action, re-read: `auth_status` for billing, `GET /api/status` for the model and idle timer. Report the numbers you read, not the command's success.

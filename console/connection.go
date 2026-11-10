@@ -31,7 +31,7 @@ func (a *App) accountCard(c *ui.Context, p Palette) ui.Element {
 				dot(c, p.Success, 8)
 				ui.Text(c, maskEmail(a.acct.Email)).FontSize(15).SingleLine()
 			})
-			metric(c, p, "账户余额", thousands(a.acct.Balance)+" CU", "", 22, p.Text)
+			metric(c, p, "账户余额", thousands(a.balance())+" CU", "", 22, p.Text)
 		default:
 			ui.Row(c).Gap(10).Children(func() {
 				dot(c, p.Muted, 8)

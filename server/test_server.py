@@ -1495,5 +1495,37 @@ class RunnerRegistryTest(BoundStatusTestCase):
             load.assert_not_called()
 
 
+class IdleWatchdogCadenceTest(unittest.TestCase):
+    """A chat must reset the idle countdown within one 5 s tick; the MCP bridge checks keep
+    their old 15 s / 60 s pace."""
+
+    def test_samples_every_tick_and_checks_the_bridge_less_often(self):
+        sleeps, touches, ensure, selftest = [], [], [], []
+        ticks = iter([False, True] + [False] * 10)
+
+        def sleep(sec):
+            sleeps.append(sec)
+            if len(sleeps) > 12:
+                raise StopIteration
+
+        with mock.patch.object(srv.time, "sleep", sleep), \
+                mock.patch.object(srv, "_sample_llama_8081_slots", lambda: next(ticks)), \
+                mock.patch.object(srv, "touch_activity", lambda: touches.append(len(sleeps))), \
+                mock.patch.object(srv, "_ensure_mcp_bridge", lambda: ensure.append(len(sleeps))), \
+                mock.patch.object(srv, "_mcp_bridge_selftest", lambda: selftest.append(len(sleeps))), \
+                mock.patch.object(srv, "_ping_local_colab_jupyter", lambda force=False: None), \
+                mock.patch.object(srv, "IDLE_TIMEOUT_MINUTES", 30), \
+                mock.patch.object(srv, "LAST_ACTIVE_TIME", time.time()), \
+                mock.patch.dict(srv.LLM_8081_STATE, {"online": True}), \
+                mock.patch.dict(srv.TASK_STATE, {"is_downloading": False, "is_loading_vram": False}):
+            with self.assertRaises(StopIteration):
+                srv._idle_watchdog_loop()
+        self.assertEqual(set(sleeps), {srv.WATCHDOG_TICK_S})
+        self.assertEqual(srv.WATCHDOG_TICK_S, 5)
+        self.assertEqual(touches, [2])  # the tick that saw inference
+        self.assertEqual(ensure, [3, 6, 9, 12])
+        self.assertEqual(selftest, [12])
+
+
 if __name__ == "__main__":
     unittest.main()

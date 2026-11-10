@@ -27,7 +27,7 @@ The token is the `token` field of `%LOCALAPPDATA%\Colab-yoga\server_token.json`,
 
 - `server_version`
 - `gpu_name`, `vram_used_gb`, `vram_total_gb`, `ram_used_gb`, `ram_total_gb`, `disk_used_gb`, `disk_total_gb`
-- `uptime_seconds` (since the runtime's first Jupyter "Kernel started"), `session_cu_used`, `cu_burn_rate_per_hour`
+- `uptime_seconds` (since the runtime's first Jupyter "Kernel started"), `session_cu_used`, `cu_burn_rate_per_hour` (both from a per-GPU price table, an estimate; what was actually charged is in `ledger.json`, see SKILL.md)
 - `idle_timeout_minutes`, `idle_remaining_seconds` (-1 when the automatic release is off)
 - `loaded_model_ids`, `context_length`
 - `is_downloading`, `is_loading_vram`, `task_progress`, `task_message`, `console_lines`

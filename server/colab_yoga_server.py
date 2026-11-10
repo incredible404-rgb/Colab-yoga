@@ -1168,18 +1168,23 @@ def unload_model(model_id: str = "") -> str:
 # ==============================================================================
 # Idle watchdog: release the runtime when nothing has used it for the set time
 # ==============================================================================
+WATCHDOG_TICK_S = 5  # how soon a chat resets the idle countdown; /slots is a local call
+MCP_BRIDGE_CHECK_TICKS = 3  # 15 s
+MCP_BRIDGE_SELFTEST_TICKS = 12  # 60 s
+
+
 def _idle_watchdog_loop() -> None:
     tick = 0
     while True:
-        time.sleep(15)
+        time.sleep(WATCHDOG_TICK_S)
         tick += 1
         # Download/load and any inference on :8081 (web, Magpie, MCP chats go straight to
         # llama-server) count as use and keep the Jupyter heartbeat going.
         llm_active = _sample_llama_8081_slots()
-        if LLM_8081_STATE["online"]:
+        if LLM_8081_STATE["online"] and tick % MCP_BRIDGE_CHECK_TICKS == 0:
             try:
                 _ensure_mcp_bridge()
-                if tick % 4 == 0:
+                if tick % MCP_BRIDGE_SELFTEST_TICKS == 0:
                     _mcp_bridge_selftest()
             except Exception as e:
                 MCP_BRIDGE_STATE["error"] = str(e)[:160]

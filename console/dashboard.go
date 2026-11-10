@@ -24,22 +24,88 @@ func (a *App) dashboard(c *ui.Context, p Palette) {
 func (a *App) dashboardSubtitle() string {
 	st := a.status
 	if a.connected && st != nil && st.Uptime > 0 {
-		since := time.Now().Add(-time.Duration(st.Uptime) * time.Second).Format("15:04")
-		return fmt.Sprintf("这台 GPU %s 分配给你，已运行 %s。对话在网页、Magpie 或 MCP 里进行，这里管算力和模型。", since, hms(st.Uptime))
+		now := a.now()
+		up := a.uptimeAt(now)
+		since := now.Add(-time.Duration(up * float64(time.Second))).Format("15:04")
+		return fmt.Sprintf("这台 GPU %s 分配给你，已运行 %s。对话在网页、Magpie 或 MCP 里进行，这里管算力和模型。", since, hms(up))
 	}
 	return "对话在网页、Magpie 或 MCP 里进行，这里管算力和模型。"
 }
 
 // ─── Bill ─────────────────────────────────────────────────────────────────────
 
+// ledgerLive: the ledger shows a billing session and no newer account reading says nothing is
+// assigned any more (a release reaches the account poll before the keeper notices it).
+func (a *App) ledgerLive(now time.Time) bool {
+	return a.ledger.Live(now) && !(a.acct.Known && a.acct.Active == 0 && a.acctAt.After(a.ledger.CheckedAt))
+}
+
+// officialRate is Colab's advertised CU/h for what is assigned now.
+func (a *App) officialRate() float64 {
+	if a.acct.Burn > 0 {
+		return a.acct.Burn
+	}
+	if a.ledgerLive(a.now()) && a.ledger.OfficialRate > 0 {
+		return a.ledger.OfficialRate
+	}
+	if a.status != nil && a.connected {
+		return a.status.Burn
+	}
+	return 0
+}
+
+// burnRate is what the ledger shows being charged once it has enough settlements, else the
+// advertised rate; measured says which, steps how many settlements the measurement spans.
+func (a *App) burnRate(now time.Time) (rate float64, measured bool, steps int) {
+	if a.ledgerLive(now) {
+		if r, n, ok := a.ledger.MeasuredRate(); ok {
+			return r, true, n
+		}
+	}
+	return a.officialRate(), false, 0
+}
+
+// balance is the newer of the account poll and the keeper's ledger reading.
+func (a *App) balance() float64 {
+	if !a.ledger.CheckedAt.IsZero() && a.ledger.CheckedAt.After(a.acctAt) {
+		return a.ledger.Balance
+	}
+	return a.acct.Balance
+}
+
+// sinceStatus is how long ago the status arrived, capped so a stalled poll does not run the
+// countdown and the uptime on indefinitely.
+func (a *App) sinceStatus(now time.Time) float64 {
+	if a.statusAt.IsZero() {
+		return 0
+	}
+	return min(max(0, now.Sub(a.statusAt).Seconds()), 60)
+}
+
+func (a *App) idleRemainingAt(now time.Time) float64 {
+	return max(0, a.status.IdleRemaining-a.sinceStatus(now))
+}
+
+func (a *App) uptimeAt(now time.Time) float64 {
+	return a.status.Uptime + a.sinceStatus(now)
+}
+
+func agoText(d time.Duration) string {
+	if d < time.Minute {
+		return "不到 1 分钟前"
+	}
+	return fmt.Sprintf("%d 分钟前", int(d.Minutes()))
+}
+
 func (a *App) billCard(c *ui.Context, p Palette) ui.Element {
 	st := a.status
-	burn := a.acct.Burn
-	if burn == 0 && st != nil && a.connected {
-		burn = st.Burn
-	}
+	now := a.now()
+	burn, measured, steps := a.burnRate(now)
+	official := a.officialRate()
+	led := a.ledger
+	live := a.ledgerLive(now)
 	billing := a.connected || a.acct.Active > 0
-	return card(c, p, 1, "算力账单", "余额与扣费取自 Colab 官方账本", func() {
+	return card(c, p, 1, "算力账单", "余额与扣费以 Colab 官方账本的实际扣减为准", func() {
 		if billing && burn > 0 {
 			pill(c, "计费中", p.Accent)
 		} else {
@@ -47,21 +113,48 @@ func (a *App) billCard(c *ui.Context, p Palette) ui.Element {
 		}
 	}, func() {
 		bal := "—"
-		hours := ""
+		var sub []string
 		if a.acct.Known && a.acct.LoggedIn {
-			bal = thousands(a.acct.Balance) + " CU"
+			bal = thousands(a.balance()) + " CU"
 			if burn > 0 {
-				hours = fmt.Sprintf("按当前速率约可用 %.0f 小时", a.acct.Balance/burn)
+				sub = append(sub, fmt.Sprintf("按当前速率约可用 %.0f 小时", a.balance()/burn))
+			}
+			if live {
+				if last := led.LastSettle(); !last.IsZero() {
+					sub = append(sub, "上次结算 "+agoText(now.Sub(last)))
+				} else {
+					sub = append(sub, "官方账本约每 5 分钟结算一次")
+				}
 			}
 		}
-		metricRoll(c, p, "账户余额", bal, hours, 38, p.Text, numericDown)
-		ui.Row(c).Wrap().GapX(36).GapY(14).Children(func() {
-			metricRoll(c, p, "扣费速率", fmt.Sprintf("%.2f CU/h", burn), "", 20, map[bool]ui.Color{true: p.Accent, false: p.Text}[burn > 0], numeric)
+		metricRoll(c, p, "账户余额", bal, strings.Join(sub, " · "), 38, p.Text, numericDown).
+			Tooltip("Colab 官方账本余额。账本约每 5 分钟结算一次，结算之间余额不动")
+		ui.Row(c).Wrap().GapX(36).GapY(14).AlignItems(ui.Start).Children(func() {
+			rateTip := "Colab 官方报价。账本结算满 3 次（开机约 20 分钟）后改用余额实际扣减算出的速率"
+			rateSub := ""
+			if measured {
+				rateTip = fmt.Sprintf("按官方账本最近 %d 次结算的实际扣减算出；Colab 官方报价 %.2f CU/h", steps, official)
+				rateSub = "账本实测"
+			} else if burn > 0 {
+				rateSub = "官方报价"
+			}
+			metricRoll(c, p, "扣费速率", fmt.Sprintf("%.2f CU/h", burn), rateSub, 20, map[bool]ui.Color{true: p.Accent, false: p.Text}[burn > 0], numeric).Tooltip(rateTip)
 			if st != nil && a.connected {
-				metricRoll(c, p, "本次运行", hms(st.Uptime), "", 20, p.Text, numeric).Tooltip("从这台 GPU 分配给你（开始计费）算起")
-				metricRoll(c, p, "本次已花", fmt.Sprintf("%.1f CU", st.SessionCU), "", 20, p.Text, numeric)
+				metricRoll(c, p, "本次运行", hms(a.uptimeAt(now)), "", 20, p.Text, numeric).Tooltip("从这台 GPU 分配给你（开始计费）算起")
 			} else {
 				metric(c, p, "本次运行", "—", "", 20, p.Text3)
+			}
+			switch {
+			case live && led.Session.Exact:
+				metricRoll(c, p, "本次已花", fmt.Sprintf("%.2f CU", led.Spent()), "账本实扣", 20, p.Text, numeric).
+					Tooltip(fmt.Sprintf("开机前余额 %s − 当前余额。账本约每 5 分钟结算，最近几分钟的还没扣", thousands(led.Session.StartBalance)))
+			case live:
+				metricRoll(c, p, "本次已花", fmt.Sprintf("≥ %.2f CU", led.Spent()), "自 "+led.Session.StartAt.Format("15:04")+" 起实扣", 20, p.Text, numeric).
+					Tooltip("没记录到开机前的余额，只算从这之后官方账本的实际扣减")
+			case st != nil && a.connected:
+				metricRoll(c, p, "本次已花", fmt.Sprintf("≈ %.1f CU", a.uptimeAt(now)/3600*official), "估算", 20, p.Text, numeric).
+					Tooltip("运行时长 × 官方报价。后台保活记下账本后改为实扣")
+			default:
 				metric(c, p, "本次已花", "—", "", 20, p.Text3)
 			}
 		})
@@ -93,7 +186,7 @@ func (a *App) idleBlock(c *ui.Context, p Palette) {
 			case st.IdleTimeoutMin <= 0:
 				text = "自动释放已关闭，用完记得手动释放"
 			default:
-				rem := int(st.IdleRemaining)
+				rem := int(a.idleRemainingAt(a.now()))
 				text = fmt.Sprintf("闲置 %d 分 %02d 秒后自动释放（网页 / Magpie / MCP 的对话都算在用）", rem/60, rem%60)
 			}
 			ui.Text(c, text).FontSize(13).TextColor(p.Text2).Grow(1).Shrink(1).ContentTransition(numericDown)
@@ -101,7 +194,7 @@ func (a *App) idleBlock(c *ui.Context, p Palette) {
 		})
 		frac := 0.0
 		if st != nil && a.connected && st.IdleTimeoutMin > 0 {
-			frac = st.IdleRemaining / (st.IdleTimeoutMin * 60)
+			frac = a.idleRemainingAt(a.now()) / (st.IdleTimeoutMin * 60)
 		}
 		col := p.Accent
 		if frac < 0.2 {

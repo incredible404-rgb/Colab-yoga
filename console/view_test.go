@@ -21,6 +21,10 @@ func fakeApp(t *testing.T) *App {
 		Token: filepath.Join(dir, "server_token.json"), Runners: []string{runners}}
 	a := newApp(p)
 	a.disableBackground = true
+	// A still clock: the countdown and uptime are drawn from it, and a real one would let a
+	// test straddling a second boundary see them roll. Tests that need time to pass set their own.
+	clock := time.Now()
+	a.now = func() time.Time { return clock }
 	a.tsURL = "http://qwen.example.ts.net:443"
 	a.novelRoot = `C:\Users\example\Documents\Colab创作`
 	a.serverURL = "https://abcdef.gradio.invalid"
@@ -362,10 +366,15 @@ func TestSnapshots(t *testing.T) {
 
 // TestIdleWindowIsStill guards the console's cost at rest: once the page has arrived and
 // the charts have slid in their last sample, a connected but idle window asks for no
-// frames. Only a job in flight (here a wake) keeps the status light pulsing.
+// frames. Only a job in flight (here a wake) keeps the status light pulsing. The clock is
+// held still: the idle countdown and the uptime move once a second by design (secondHand),
+// and that tick must settle too.
 func TestIdleWindowIsStill(t *testing.T) {
 	for _, page := range []string{"dashboard", "connection"} {
 		a := fakeApp(t)
+		clock := time.Now()
+		a.now = func() time.Time { return clock }
+		a.applyStatus(a.status)
 		a.page = page
 		tt := ui.NewTesterWith(a.view, 1440, 900, ui.TesterOptions{Dark: true})
 		if !tt.FramePending() {
@@ -375,8 +384,17 @@ func TestIdleWindowIsStill(t *testing.T) {
 		if tt.FramePending() {
 			t.Errorf("%s: an idle window keeps drawing frames", page)
 		}
+		clock = clock.Add(time.Second) // the second hand: one redraw, one short roll, then still
+		tt.Frame()
+		tt.Advance(2 * time.Second)
+		if tt.FramePending() {
+			t.Errorf("%s: the per-second tick keeps drawing frames", page)
+		}
 	}
 	a := fakeApp(t)
+	clock := time.Now()
+	a.now = func() time.Time { return clock }
+	a.applyStatus(a.status)
 	tt := ui.NewTesterWith(a.view, 1440, 900, ui.TesterOptions{Dark: true})
 	tt.Advance(3 * time.Second)
 	a.waking = true

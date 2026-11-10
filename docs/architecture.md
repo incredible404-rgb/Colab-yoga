@@ -41,8 +41,9 @@ wheel hashes pinned; `pip install --target --platform win_amd64 --python-version
 or a `site-packages\` that already matches the lock is left alone. Bumping Python means changing
 the URL and hash in `install.py`; bumping a package means changing `bridge/requirements.txt`.
 
-Config and state: `%LOCALAPPDATA%\Colab-yoga\settings.json`, `keeper.json`, `server_token.json` (the
-control token below; per user, never in the repo or a package). An earlier
+Config and state: `%LOCALAPPDATA%\Colab-yoga\settings.json`, `keeper.json`, `ledger.json` (the
+official balance as read, below), `server_token.json` (the control token below; per user, never
+in the repo or a package). An earlier
 install's `%LOCALAPPDATA%\EasyColab\settings.json` and `keeper.json` are copied once, only when
 the new ones do not exist; nothing reads the old directory afterwards.
 
@@ -150,4 +151,30 @@ until it is restarted.
   to keep the runtime alive.
 - The server's watchdog counts as use: model download/load, and any inference on :8081
   (`/slots`: busy slot, token counters, `id_task`, last-request stamps), which is how web,
-  Magpie and MCP chats keep the runtime.
+  Magpie and MCP chats keep the runtime. It samples every 5 s, so a chat resets the idle
+  countdown within 5 s; the console polls the status every 2.5 s and counts the seconds down
+  locally in between, re-anchoring on each poll (for at most 60 s without one).
+
+## Billing
+
+Colab books compute units about every 5 minutes, each step roughly `consumptionRateHourly`
+times the time since the previous one; between steps the balance does not move. The console
+therefore shows what the ledger deducted, not uptime × rate:
+
+- The keeper reads `ccu-info` every 15 s between its beats (and once after it releases);
+  `auth_status` also writes when nothing is assigned, or when no keeper has read for 45 s.
+  Both fold the reading into `ledger.json` (`ledger_observe`): `idle_balance` is the last
+  balance with nothing assigned, and a session (a stretch with assignments) keeps
+  `start_balance` and `points`, the readings where the balance dropped. `wake` reads once
+  right before it allocates.
+- Spent this session = `start_balance` − balance. It is exact when the session started from an
+  `idle_balance` read within 2 h; otherwise it counts from the session's first reading and the
+  console shows it as "≥ … 自 HH:MM 起". A rise in the balance is a top-up: it moves
+  `start_balance` up and is never counted as negative spending.
+- The rate shown is measured from the points once the last 35 min hold at least 3 steps
+  (single steps jitter by several percent); until then it is the advertised rate, labelled so.
+  The server's `session_cu_used` (uptime × a per-GPU table) is only a fallback while no
+  ledger reading exists.
+- When a colab_keepalive.py daemon covers the runtime the keeper exits after 20 min (above),
+  and the ledger is read by the console's account poll instead (every 40 s with the window
+  shown, 80 s from the tray), so settlement times are coarser.

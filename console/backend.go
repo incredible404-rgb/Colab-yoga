@@ -37,6 +37,7 @@ type Paths struct {
 	ConfigDir string // %LOCALAPPDATA%\Colab-yoga
 	Settings  string
 	Keeper    string
+	Ledger    string // the official balance as the keeper samples it (colab_yoga_bridge.py ledger_observe)
 	Token     string // the server's control token, written by the bridge (wake, discover_url)
 	// Runner scripts with real keys, exported by colab-gpu-llm-service's colab_kernel.py:
 	// next to the install first, then the standard install (for a package unzipped
@@ -77,6 +78,7 @@ func pathsFor(local, appDir string) Paths {
 		ConfigDir: cfg,
 		Settings:  filepath.Join(cfg, "settings.json"),
 		Keeper:    filepath.Join(cfg, "keeper.json"),
+		Ledger:    filepath.Join(cfg, "ledger.json"),
 		Token:     filepath.Join(cfg, "server_token.json"),
 		Runners: []string{
 			filepath.Join(appDir, "colab_kernel_runners.json"),
@@ -384,6 +386,121 @@ func readKeeper(path string) Keeper {
 	}
 	k.Alive = k.ExitReason == "" && pidAlive(int(num(m, "pid", 0)))
 	return k
+}
+
+// ─── Official ledger (ledger.json, written by the bridge's keeper and auth_status) ──────
+
+// Colab books CU about every 5 minutes, each step roughly the advertised rate times the time
+// since the previous one, but the steps jitter: one 4.9-minute step came to 10.45 CU/h against
+// 10.05 advertised. A measured rate therefore spans at least ledgerMinSteps settlements, over
+// the last ledgerWindow, so it follows a rate change within about half an hour.
+const (
+	ledgerMinSteps = 3
+	ledgerWindow   = 35 * time.Minute
+	ledgerStale    = 2 * time.Minute // older than this the keeper is not reading it
+)
+
+type LedgerPoint struct {
+	At      time.Time
+	Balance float64
+}
+
+// LedgerSession is one billing stretch (assignments > 0). Exact: StartBalance is the balance
+// read with nothing assigned right before it, so StartBalance - Balance is everything this
+// session was charged; otherwise the charges before StartAt are unknown.
+type LedgerSession struct {
+	StartBalance float64
+	StartAt      time.Time
+	Exact        bool
+	Ended        bool
+	Points       []LedgerPoint // readings where the balance dropped: observed settlements
+}
+
+type Ledger struct {
+	Balance      float64
+	CheckedAt    time.Time
+	Active       int
+	OfficialRate float64
+	PollEvery    time.Duration
+	Session      *LedgerSession
+}
+
+func unixTime(v float64) time.Time {
+	if v <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, int64(v*float64(time.Second)))
+}
+
+func readLedger(path string) Ledger {
+	m := map[string]any{}
+	b, err := os.ReadFile(path)
+	if err != nil || json.Unmarshal(b, &m) != nil {
+		return Ledger{}
+	}
+	l := Ledger{Balance: num(m, "balance", 0), CheckedAt: unixTime(num(m, "checked_ts", 0)),
+		Active: int(num(m, "active", 0)), OfficialRate: num(m, "official_rate", 0),
+		PollEvery: time.Duration(num(m, "poll_s", 15) * float64(time.Second))}
+	if s, ok := m["session"].(map[string]any); ok {
+		ls := &LedgerSession{StartBalance: num(s, "start_balance", 0), StartAt: unixTime(num(s, "start_ts", 0)),
+			Ended: num(s, "ended_ts", 0) > 0}
+		ls.Exact, _ = s["exact"].(bool)
+		if pts, ok := s["points"].([]any); ok {
+			for _, p := range pts {
+				if pair, ok := p.([]any); ok && len(pair) == 2 {
+					ts, _ := pair[0].(float64)
+					bal, _ := pair[1].(float64)
+					ls.Points = append(ls.Points, LedgerPoint{At: unixTime(ts), Balance: bal})
+				}
+			}
+		}
+		l.Session = ls
+	}
+	return l
+}
+
+// Live: a billing session the keeper is still reading.
+func (l Ledger) Live(now time.Time) bool {
+	return l.Session != nil && !l.Session.Ended && l.Active > 0 && !l.CheckedAt.IsZero() &&
+		now.Sub(l.CheckedAt) < ledgerStale
+}
+
+// Spent is what the official ledger has deducted this session so far.
+func (l Ledger) Spent() float64 {
+	if l.Session == nil {
+		return 0
+	}
+	return max(0, l.Session.StartBalance-l.Balance)
+}
+
+// LastSettle is when a deduction was last seen, zero before the first one.
+func (l Ledger) LastSettle() time.Time {
+	if l.Session == nil || len(l.Session.Points) == 0 {
+		return time.Time{}
+	}
+	return l.Session.Points[len(l.Session.Points)-1].At
+}
+
+// MeasuredRate is CU/h from the balance itself: the drop from the first to the last settlement
+// in the window over the time between them, and how many settlements that spans. ok is false
+// until the window holds ledgerMinSteps of them.
+func (l Ledger) MeasuredRate() (rate float64, steps int, ok bool) {
+	if l.Session == nil || len(l.Session.Points) < ledgerMinSteps+1 {
+		return 0, 0, false
+	}
+	pts := l.Session.Points
+	last := pts[len(pts)-1]
+	first := len(pts) - 1
+	for first > 0 && last.At.Sub(pts[first-1].At) <= ledgerWindow {
+		first--
+	}
+	steps = len(pts) - 1 - first
+	hours := last.At.Sub(pts[first].At).Hours()
+	if steps < ledgerMinSteps || hours <= 0 {
+		return 0, steps, false
+	}
+	rate = (pts[first].Balance - last.Balance) / hours
+	return rate, steps, rate > 0
 }
 
 // ─── Access probes (what the user actually chats through) ─────────────────────

@@ -52,7 +52,10 @@ type App struct {
 	connected         bool
 	failures          int
 	status            *Status
+	statusAt          time.Time // when status arrived: the countdown and uptime run on from it
 	acct              Account
+	acctAt            time.Time
+	ledger            Ledger
 	access            Access
 	keeper            Keeper
 	hist              [3][]float64
@@ -108,6 +111,7 @@ func newApp(p Paths) *App {
 	a.hfToken = str(m, "hfToken", "")
 	a.urlDraft = a.serverURL
 	a.keeper = readKeeper(p.Keeper)
+	a.ledger = readLedger(p.Ledger)
 	return a
 }
 
@@ -158,6 +162,7 @@ func (a *App) flash(msg string) {
 func (a *App) run() {
 	a.once("acct", a.refreshAccount)
 	a.once("access", a.refreshAccess)
+	go a.secondHand()
 	t := time.NewTicker(2500 * time.Millisecond)
 	for range t.C {
 		a.apply(func() { a.tick++ })
@@ -173,13 +178,21 @@ func (a *App) step() {
 	var connected, hidden bool
 	var active int
 	var loggedIn bool
+	var ledgerAt time.Time
 	done := make(chan struct{})
 	a.apply(func() {
 		url, tick, connected, active, loggedIn = a.serverURL, a.tick, a.connected, a.acct.Active, a.acct.LoggedIn
+		ledgerAt = a.ledger.CheckedAt
 		hidden = a.live && a.win == nil
 		close(done)
 	})
 	<-done
+	if led := readLedger(a.paths.Ledger); !led.CheckedAt.Equal(ledgerAt) {
+		a.apply(func() {
+			a.ledger = led
+			a.updateTray()
+		})
+	}
 	due := schedule(tick, hidden, connected, active)
 	if url != "" && due.status {
 		a.once("status", func() { a.pollStatus(url) })
@@ -198,6 +211,20 @@ func (a *App) step() {
 			lost := a.serverURL == "" || (!a.connected && a.failures >= 4)
 			if lost && !a.userClearedURL && !a.waking && time.Since(a.lastDiscover) > 2*time.Minute {
 				a.discover(false)
+			}
+		})
+	}
+}
+
+// secondHand redraws a shown, connected window once a second so the idle countdown and the
+// uptime run on between polls (applyStatus re-anchors them on every poll). Nothing is drawn
+// while only the tray icon shows.
+func (a *App) secondHand() {
+	t := time.NewTicker(time.Second)
+	for range t.C {
+		mygo.RunOnMain(func() {
+			if a.win != nil && a.connected && a.status != nil {
+				a.win.Invalidate()
 			}
 		})
 	}
@@ -247,6 +274,7 @@ func (a *App) pollStatus(url string) {
 
 func (a *App) applyStatus(st *Status) {
 	a.status, a.connected, a.failures = st, true, 0
+	a.statusAt = a.now()
 	push := func(i int, used, total float64) {
 		if total <= 0 {
 			return
@@ -319,7 +347,7 @@ func (a *App) refreshAccount() {
 			a.logf("查询 Colab 账号失败：%s", perr)
 			return
 		}
-		a.acct = acct
+		a.acct, a.acctAt = acct, a.now()
 		a.updateTray()
 	})
 }
@@ -335,9 +363,10 @@ func (a *App) updateTray() {
 	case !a.acct.LoggedIn:
 		tip += " · 未绑定 Google 账号"
 	case a.acct.Active > 0:
-		tip += fmt.Sprintf(" · 计费中 %.2f CU/h · 余额 %s CU", a.acct.Burn, thousands(a.acct.Balance))
+		rate, _, _ := a.burnRate(a.now())
+		tip += fmt.Sprintf(" · 计费中 %.2f CU/h · 余额 %s CU", rate, thousands(a.balance()))
 	default:
-		tip += fmt.Sprintf(" · 不在计费 · 余额 %s CU", thousands(a.acct.Balance))
+		tip += fmt.Sprintf(" · 不在计费 · 余额 %s CU", thousands(a.balance()))
 	}
 	a.tray.SetToolTip(tip)
 }
@@ -667,7 +696,7 @@ func (a *App) release() {
 			a.acct.Active = int(num(m, "active_assignments", 0))
 			a.acct.Burn = num(m, "burn_rate_hourly", 0)
 			if b := num(m, "paid_balance", -1); b >= 0 {
-				a.acct.Balance = b
+				a.acct.Balance, a.acctAt = b, a.now()
 			}
 			a.flash(fmt.Sprintf("已释放全部实例，当前扣费 %.2f CU/h", a.acct.Burn))
 		})
