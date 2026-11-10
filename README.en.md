@@ -6,6 +6,12 @@ A system tray console for self-hosted LLMs on paid Google Colab GPUs: wake or re
 
 Run your own large language models on paid Google Colab GPUs (default: G4 · RTX PRO 6000 96 GB) and expose `llama-server :8081` over Tailscale to web chat, Magpie, and the MCP novel-directory bridge. Chat traffic does not pass through Colab-yoga; Colab-yoga only manages the GPU: how much it costs, which model is running, whether each entrypoint is reachable, keeping the instance alive while in use, and releasing it automatically when idle.
 
+![Colab-yoga UI & Non-linear Motion](docs/motion.gif)
+
+| Dark theme (default) | Light theme (Oklab crossfade) |
+|---|---|
+| ![Dark dashboard](docs/dashboard-dark.png) | ![Light dashboard](docs/dashboard-light.png) |
+
 The model runtime itself (`colab_kernel` startup script, model catalog, Chinese thinking-template patches, and novel MCP service) lives in the `colab-gpu-llm-service` repository, not here.
 
 ## Components

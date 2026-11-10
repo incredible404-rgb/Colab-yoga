@@ -6,6 +6,12 @@
 
 在 Google Colab 付费 GPU（默认 G4 · RTX PRO 6000 96 GB）上跑自己的大模型，并通过 Tailscale 把 llama-server :8081 提供给网页对话、Magpie 和 MCP 小说目录桥。对话不经过 Colab-yoga，它只负责管理 GPU：花了多少钱、跑的是哪个模型、每个入口通不通，以及让实例在有人用时一直活着、没人用时自动释放。
 
+![Colab-yoga 界面与非线性动效](docs/motion.gif)
+
+| 深色模式（默认） | 浅色模式（Oklab 平滑切换） |
+|---|---|
+| ![深色模式仪表盘](docs/dashboard-dark.png) | ![浅色模式仪表盘](docs/dashboard-light.png) |
+
 模型本身（colab_kernel 启动脚本、模型清单、中文思考补丁、小说 MCP 服务）在 colab-gpu-llm-service 项目里，不在这个仓库。
 
 ## 组成
