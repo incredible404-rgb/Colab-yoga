@@ -291,43 +291,56 @@ class UrlParsingTests(unittest.TestCase):
 
 
 class RunnerPathTests(unittest.TestCase):
-    """Only the file next to the install counts; nothing is looked up at an older path."""
+    """Runner file lookup: next to the install, then the standard install; never EasyColab."""
 
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
-        self.install_dir = self.tmp / "install"
+        self.install_dir = self.tmp / "unzipped"
         self.install_file = self.install_dir / "colab_kernel_runners.json"
         self.bridge_py = self.install_dir / "bridge" / "colab_yoga_bridge.py"
         self.bridge_py.parent.mkdir(parents=True)
+        self.local = self.tmp / "local"
+        self.standard_file = self.local / "Programs" / "Colab-yoga" / "colab_kernel_runners.json"
+        self.old_file = self.local / "Programs" / "EasyColab" / "_internal" / "colab_kernel_runners.json"
+
+    def _put(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
 
     def _call_resolve(self) -> str | None:
         orig_file = cb.__file__
+        orig_env = os.environ.get("LOCALAPPDATA")
         try:
             cb.__file__ = str(self.bridge_py)
+            os.environ["LOCALAPPDATA"] = str(self.local)
             return cb.resolve_runners_path()
         finally:
             cb.__file__ = orig_file
+            if orig_env is None:
+                os.environ.pop("LOCALAPPDATA", None)
+            else:
+                os.environ["LOCALAPPDATA"] = orig_env
 
     def test_missing(self) -> None:
         self.assertIsNone(self._call_resolve())
 
     def test_install_copy(self) -> None:
-        self.install_file.write_text("{}", encoding="utf-8")
+        self._put(self.install_file)
+        self.assertEqual(self._call_resolve(), str(self.install_file))
+
+    def test_standard_install_is_the_fallback(self) -> None:
+        self._put(self.standard_file)
+        self.assertEqual(self._call_resolve(), str(self.standard_file))
+
+    def test_install_copy_wins_over_standard(self) -> None:
+        self._put(self.standard_file)
+        self._put(self.install_file)
+        os.utime(self.install_file, (1000, 1000))  # priority, not age
         self.assertEqual(self._call_resolve(), str(self.install_file))
 
     def test_old_easycolab_path_is_ignored(self) -> None:
-        old = self.tmp / "local" / "Programs" / "EasyColab" / "_internal"
-        old.mkdir(parents=True)
-        (old / "colab_kernel_runners.json").write_text("{}", encoding="utf-8")
-        orig_env = os.environ.get("LOCALAPPDATA")
-        os.environ["LOCALAPPDATA"] = str(self.tmp / "local")
-        try:
-            self.assertIsNone(self._call_resolve())
-        finally:
-            if orig_env is None:
-                os.environ.pop("LOCALAPPDATA", None)
-            else:
-                os.environ["LOCALAPPDATA"] = orig_env
+        self._put(self.old_file)
+        self.assertIsNone(self._call_resolve())
 
 
 class AuthStatusTests(unittest.TestCase):

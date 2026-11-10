@@ -461,11 +461,24 @@ def _allocate_fresh_session(session_name: str, gpu_type: str) -> SessionState:
 
 
 def resolve_runners_path() -> str | None:
-    """<install>/colab_kernel_runners.json, where colab-gpu-llm-service's colab_kernel.py
-    exports it; None if it is not there."""
+    """colab_kernel_runners.json, where colab-gpu-llm-service's colab_kernel.py exports it:
+    next to this install first (<install>/), then the standard install
+    %LOCALAPPDATA%/Programs/Colab-yoga/ (for a package unzipped elsewhere). None if neither
+    has it."""
+    name = "colab_kernel_runners.json"
     install_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    path = os.path.join(install_dir, "colab_kernel_runners.json")
-    return path if os.path.isfile(path) else None
+    local_app_data = (
+        os.environ.get("LOCALAPPDATA")
+        or os.environ.get("APPDATA")
+        or os.path.expanduser("~/AppData/Local")
+    )
+    for path in (
+        os.path.join(install_dir, name),
+        os.path.join(local_app_data, "Programs", "Colab-yoga", name),
+    ):
+        if os.path.isfile(path):
+            return path
+    return None
 
 
 def cmd_wake(gpu_type: str = "G4", server_py_path: str = None, app_py_path: str = None):

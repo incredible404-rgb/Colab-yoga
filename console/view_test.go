@@ -126,10 +126,24 @@ func TestPaths(t *testing.T) {
 	if p.runnersFile() != "" {
 		t.Error("no runner file exists yet")
 	}
-	_ = os.MkdirAll(filepath.Dir(p.Runners), 0o755)
-	_ = os.WriteFile(p.Runners, []byte("{}"), 0o644)
-	if p.runnersFile() != p.Runners || filepath.Dir(p.Runners) != p.AppDir {
-		t.Errorf("runners must live next to the install: %q", p.runnersFile())
+	for _, f := range p.Runners {
+		if strings.Contains(f, "EasyColab") {
+			t.Errorf("an old EasyColab path is still looked up: %q", f)
+		}
+	}
+	// A package unzipped elsewhere falls back to the standard install's runner file.
+	other := filepath.Join(t.TempDir(), "Colab-yoga")
+	q := pathsFor(local, other)
+	std := filepath.Join(local, "Programs", "Colab-yoga", "colab_kernel_runners.json")
+	_ = os.MkdirAll(filepath.Dir(std), 0o755)
+	_ = os.WriteFile(std, []byte("{}"), 0o644)
+	if q.runnersFile() != std {
+		t.Errorf("standard install runners not found: %q", q.runnersFile())
+	}
+	_ = os.MkdirAll(other, 0o755)
+	_ = os.WriteFile(q.Runners[0], []byte("{}"), 0o644)
+	if q.runnersFile() != q.Runners[0] {
+		t.Errorf("the copy next to the install must win: %q", q.runnersFile())
 	}
 }
 

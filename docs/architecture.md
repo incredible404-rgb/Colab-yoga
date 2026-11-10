@@ -44,9 +44,10 @@ Config and state: `%LOCALAPPDATA%\Colab-yoga\settings.json`, `keeper.json`. An e
 install's `%LOCALAPPDATA%\EasyColab\settings.json` and `keeper.json` are copied once, only when
 the new ones do not exist; nothing reads the old directory afterwards.
 
-Runner scripts (with real keys, never committed or packaged): `<install>\colab_kernel_runners.json`
-only, where colab-gpu-llm-service's `colab_kernel.py` exports it. The console and the bridge look
-nowhere else.
+Runner scripts (with real keys, never committed or packaged): `colab_kernel_runners.json`, where
+colab-gpu-llm-service's `colab_kernel.py` exports it. Looked up in `<install>\` first, then in
+`%LOCALAPPDATA%\Programs\Colab-yoga\` (which only differs for a package unzipped elsewhere); the
+first that exists wins. Nothing under `Programs\EasyColab` is read.
 
 ### Retired: the EasyColab compatibility layer
 
@@ -65,7 +66,9 @@ removed as links (never recursed into); a directory that is not exactly that lay
   `COLAB_YOGA_URL=https://…` to its log. Wake, discover and the keeper find the URL by that line.
 - Wake never kills llama-server :8081 or the MCP forwarder. It kills an older server of either
   name (`/content/colab_yoga_server.py`, legacy `/content/app.py`) so only one idle watchdog runs.
-- Colab session name in `~/.config/colab-cli/sessions.json` stays `easycolab` (shared with `colab_cli.py`).
+- The Colab session name in `~/.config/colab-cli/sessions.json` is `easycolab`, shared with
+  `colab_cli.py` (which also accepts `colab-yoga`). It is an internal identifier, not a path,
+  and renaming it would orphan a live runtime's session, so it is kept on purpose.
 
 ## HTTP API (server, JSON)
 

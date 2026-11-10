@@ -37,9 +37,10 @@ type Paths struct {
 	ConfigDir string // %LOCALAPPDATA%\Colab-yoga
 	Settings  string
 	Keeper    string
-	// Runner scripts with real keys, exported next to the install by
-	// colab-gpu-llm-service's colab_kernel.py; never part of a release package.
-	Runners string
+	// Runner scripts with real keys, exported by colab-gpu-llm-service's colab_kernel.py:
+	// next to the install first, then the standard install (for a package unzipped
+	// elsewhere). Never part of a release package. The first that exists is used.
+	Runners []string
 }
 
 func findPaths() Paths {
@@ -75,14 +76,19 @@ func pathsFor(local, appDir string) Paths {
 		ConfigDir: cfg,
 		Settings:  filepath.Join(cfg, "settings.json"),
 		Keeper:    filepath.Join(cfg, "keeper.json"),
-		Runners:   filepath.Join(appDir, "colab_kernel_runners.json"),
+		Runners: []string{
+			filepath.Join(appDir, "colab_kernel_runners.json"),
+			filepath.Join(local, "Programs", "Colab-yoga", "colab_kernel_runners.json"),
+		},
 	}
 }
 
-// runnersFile is the runner script file, "" if it does not exist.
+// runnersFile is the first runner script file that exists, "" if none does.
 func (p Paths) runnersFile() string {
-	if fileExists(p.Runners) {
-		return p.Runners
+	for _, f := range p.Runners {
+		if fileExists(f) {
+			return f
+		}
 	}
 	return ""
 }
