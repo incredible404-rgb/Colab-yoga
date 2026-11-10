@@ -119,7 +119,7 @@ class WakeReuseTests(unittest.TestCase):
 
     def _wake(self) -> str:
         with self._redirect:
-            self.cb.cmd_wake("G4", server_py_path="colab_yoga_server.py")
+            self.ok = self.cb.cmd_wake("G4", server_py_path="colab_yoga_server.py")
         return self._out.getvalue()
 
     def test_slow_probe_on_assigned_vm_does_not_release(self) -> None:
@@ -130,6 +130,7 @@ class WakeReuseTests(unittest.TestCase):
         self.assertEqual(self.calls["unassign"], [])
         self.assertEqual(self.calls["allocate"], 0)
         self.assertIn("WAKE_ERROR", out)
+        self.assertFalse(self.ok)
 
     def test_stale_record_with_live_vm_reuses_live_vm(self) -> None:
         self.sessions = {
@@ -154,15 +155,105 @@ class WakeReuseTests(unittest.TestCase):
         self.sessions = {"easycolab": self._sess("easycolab", "gone")}
         self.assignments = []
         self._wake()
-        self.assertEqual(self.calls["unassign"], [])
         self.assertEqual(self.calls["allocate"], 1)
+        # the reclaimed record is never unassigned; only the new instance goes back, because
+        # this fixture's upload fails (see test_failed_wake_releases_only_what_it_allocated)
+        self.assertEqual(self.calls["unassign"], ["new"])
 
     def test_explicit_gpu_change_still_releases(self) -> None:
         self.sessions = {"easycolab": self._sess("easycolab", "vm1", acc="A100")}
         self.assignments = [self._assign("vm1", acc="A100")]
         self._wake()
-        self.assertEqual(self.calls["unassign"], ["vm1"])
+        self.assertEqual(self.calls["unassign"][0], "vm1")  # the old model's instance, on purpose
         self.assertEqual(self.calls["allocate"], 1)
+
+    def test_failed_wake_releases_only_what_it_allocated(self) -> None:
+        # upload fails right after a fresh allocation: that instance goes back, the error is
+        # printed after the release, and the result says failure
+        self.sessions = {}
+        self.assignments = []
+        out = self._wake()
+        self.assertFalse(self.ok)
+        self.assertEqual(self.calls["unassign"], ["new"])
+        self.assertEqual(self.calls["pruned"], ["easycolab"])
+        self.assertIn("WAKE_ERROR", out)
+        self.assertLess(out.index("释放本次新分配"), out.index("WAKE_ERROR"))
+
+    def test_failed_wake_on_a_reused_instance_does_not_release_it(self) -> None:
+        self.sessions = {"easycolab": self._sess("easycolab", "vm1")}
+        self.assignments = [self._assign("vm1")]
+        out = self._wake()  # upload fails
+        self.assertFalse(self.ok)
+        self.assertEqual(self.calls["unassign"], [])
+        self.assertIn("WAKE_ERROR", out)
+
+    def _boot_with(self, msgs, fresh: bool):
+        """Run wake to the end with a runtime printing msgs; fresh=False reuses vm1."""
+        temp_dir = tempfile.mkdtemp()
+        server_py = os.path.join(temp_dir, "colab_yoga_server.py")
+        vm_boot_py = os.path.join(temp_dir, "vm_boot.py")
+        for f in (server_py, vm_boot_py):
+            Path(f).write_text("# dummy", encoding="utf-8")
+
+        class FakeContents:
+            def __init__(self, _sess):
+                pass
+
+            def upload(self, local, remote):
+                pass
+
+        class FakeRuntime:
+            def __init__(self, *a, **k):
+                pass
+
+            def execute_code(self, code, allow_stdin=False, output_hook=None, timeout=None):
+                for m in msgs:
+                    output_hook(m)
+                return list(msgs)
+
+            def stop(self, shutdown_kernel=False):
+                pass
+
+        self._saved[(cb, "ContentsClient")] = cb.ContentsClient
+        self._saved[(cb, "ColabRuntime")] = cb.ColabRuntime
+        self._saved[(cb, "resolve_runners_path")] = cb.resolve_runners_path
+        cb.ContentsClient, cb.ColabRuntime = FakeContents, FakeRuntime
+        cb.resolve_runners_path = lambda: None
+        real_join = cb.os.path.join
+        self._saved[(cb.os.path, "join")] = real_join
+        cb.os.path.join = lambda *p: vm_boot_py if p[-1] == "vm_boot.py" else real_join(*p)
+        if fresh:
+            self.sessions, self.assignments = {}, []
+        else:
+            self.sessions = {"easycolab": self._sess("easycolab", "vm1")}
+            self.assignments = [self._assign("vm1")]
+        with contextlib.redirect_stdout(self._out):
+            self.ok = cb.cmd_wake("G4", server_py_path=server_py)
+        return self._out.getvalue()
+
+    def test_boot_error_releases_a_fresh_instance_and_fails(self) -> None:
+        out = self._boot_with([{"text": "WAKE_ERROR: 启动超时\n"}], fresh=True)
+        self.assertFalse(self.ok)
+        self.assertEqual(self.calls["unassign"], ["new"])
+        self.assertLess(out.index("释放本次新分配"), out.index("WAKE_ERROR: 启动超时"))
+        self.assertEqual(self.spawned, 0)  # no keeper for an instance that was given back
+
+    def test_boot_without_a_url_counts_as_failure(self) -> None:
+        out = self._boot_with([{"text": "something else\n"}], fresh=True)
+        self.assertFalse(self.ok)
+        self.assertEqual(self.calls["unassign"], ["new"])
+        self.assertIn("WAKE_ERROR", out)
+
+    def test_boot_error_on_a_reused_instance_keeps_it(self) -> None:
+        out = self._boot_with([{"output_type": "error", "evalue": "boom"}], fresh=False)
+        self.assertFalse(self.ok)
+        self.assertEqual(self.calls["unassign"], [])
+        self.assertIn("WAKE_ERROR: boom", out)
+
+    def test_boot_success_returns_true_and_releases_nothing(self) -> None:
+        self._boot_with([{"text": "WAKE_URL: https://x.trycloudflare.com\n"}], fresh=True)
+        self.assertTrue(self.ok)
+        self.assertEqual(self.calls["unassign"], [])
 
     def test_upload_and_vm_boot_execution_flow(self) -> None:
         """Test full wake flow: upload server & runners, execute vm_boot.py, stream WAKE_URL."""
@@ -716,6 +807,37 @@ class ServerTokenTests(unittest.TestCase):
         cb.clear_server_token()  # already gone: no error
 
 
+class ExitCodeTests(unittest.TestCase):
+    """The console tells a wake failure from WAKE_ERROR, but any other caller (an agent, a
+    script) needs the exit status."""
+
+    def _exit_code(self, wake_result):
+        calls = []
+        saved = (cb.cmd_wake, cb.os._exit)
+        cb.cmd_wake = lambda *a, **k: wake_result
+        cb.os._exit = lambda c: calls.append(c)
+        try:
+            cb.run_cli(["wake"])
+        finally:
+            cb.cmd_wake, cb.os._exit = saved
+        return calls
+
+    def test_wake_failure_exits_nonzero_success_zero(self) -> None:
+        self.assertEqual(self._exit_code(False), [1])
+        self.assertEqual(self._exit_code(True), [0])
+
+    def test_other_commands_still_exit_zero(self) -> None:
+        calls = []
+        saved = (cb.cmd_auth_status, cb.os._exit)
+        cb.cmd_auth_status = lambda: None
+        cb.os._exit = lambda c: calls.append(c)
+        try:
+            cb.run_cli(["auth_status"])
+        finally:
+            cb.cmd_auth_status, cb.os._exit = saved
+        self.assertEqual(calls, [0])
+
+
 class AuthCodeSessionStoreTests(unittest.TestCase):
     """Re-authorising must not orphan the named sessions colab-gpu-llm-service is using."""
 
@@ -750,7 +872,25 @@ class AuthCodeSessionStoreTests(unittest.TestCase):
         patch(cb, "_get_account_email", lambda: self.emails.pop(0))
         patch(cb, "_clear_local_session_store", clear)
         patch(cb, "cmd_auth_status", lambda: None)
-        patch(cb, "state", types.SimpleNamespace(_client="c", _sessions="s"))
+        # the new account holds vm-new; the store has one record that backs it and one that
+        # does not
+        self.assigned = [types.SimpleNamespace(endpoint="vm-new")]
+        self.list_fails = False
+        self.store = {
+            "live": types.SimpleNamespace(name="live", endpoint="vm-new"),
+            "stale": types.SimpleNamespace(name="stale", endpoint="vm-old"),
+        }
+
+        def list_assignments():
+            if self.list_fails:
+                raise RuntimeError("offline")
+            return list(self.assigned)
+
+        patch(cb, "state", types.SimpleNamespace(
+            _client="c", _sessions="s",
+            client=types.SimpleNamespace(list_assignments=list_assignments),
+            store=types.SimpleNamespace(list=lambda: dict(self.store), remove=lambda n: self.store.pop(n, None)),
+        ))
 
     def tearDown(self) -> None:
         for (obj, name), val in self._saved.items():
@@ -767,15 +907,32 @@ class AuthCodeSessionStoreTests(unittest.TestCase):
         self.assertEqual(self.cleared, 0)
         self.assertIsNone(cb.state._client)  # but the client is rebuilt from the new token
 
-    def test_a_different_account_clears_them(self) -> None:
+    def test_a_different_account_drops_only_sessions_it_does_not_hold(self) -> None:
         self._bind("me@example.com", "other@example.com")
-        self.assertEqual(self.cleared, 1)
+        self.assertEqual(self.cleared, 0)  # never the whole table
+        self.assertEqual(list(self.store), ["live"])
 
-    def test_when_either_account_cannot_be_told_they_are_cleared(self) -> None:
-        self._bind("", "me@example.com")  # first bind, or the old token was dead
-        self.assertEqual(self.cleared, 1)
+    def test_an_unidentifiable_account_prunes_the_same_way(self) -> None:
+        self._bind("", "me@example.com")  # first bind, or neither token usable
+        self.assertEqual(list(self.store), ["live"])
+        self.store["stale2"] = types.SimpleNamespace(name="stale2", endpoint="vm-x")
         self._bind("me@example.com", "")
-        self.assertEqual(self.cleared, 2)
+        self.assertEqual(list(self.store), ["live"])
+        self.assertEqual(self.cleared, 0)
+
+    def test_nothing_is_deleted_when_the_assignments_cannot_be_read(self) -> None:
+        self.list_fails = True
+        self._bind("me@example.com", "other@example.com")
+        self.assertEqual(sorted(self.store), ["live", "stale"])
+
+    def test_a_dead_old_token_falls_back_to_the_remembered_email(self) -> None:
+        # the old token cannot refresh, so _get_account_email() answers "" before the bind;
+        # the profile cache still names the account, and the same one again keeps everything
+        (self.tmp / "profile.json").write_text(json.dumps({"fp": "x", "email": "Me@Example.com"}), encoding="utf-8")
+        self._bind("", "me@example.com")
+        self.assertEqual(sorted(self.store), ["live", "stale"])
+        self.assertEqual(self.cleared, 0)
+        self.assertFalse((self.tmp / "profile.json").exists())  # and the cache is renewed after
 
 
 if __name__ == "__main__":

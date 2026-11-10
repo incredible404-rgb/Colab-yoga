@@ -7,8 +7,8 @@ Derived from EasyColab's colab_bridge.py (original author wy51ai, Apache 2.0).
 Supports subcommands:
   - auth_status  : Check OAuth login state, CU balance, hourly burn rate, and active VMs
   - auth_url     : Generate Google OAuth2 authorization URL
-  - auth_code    : Exchange Google authorization code and save token (the local Colab session
-                   records are cleared only when the code belongs to a different account)
+  - auth_code    : Exchange Google authorization code and save token (for a different account
+                   only the local session records it does not hold are dropped)
   - auth_logout  : Disconnect and clear local tokens and sessions
   - wake         : Provision/reuse Colab GPU VM, upload colab_yoga_server.py, the runners and a
                    fresh control token, run vm_boot.py, then make sure a keeper is running
@@ -199,11 +199,40 @@ def _reset_state_cache():
     state._sessions = None
 
 
+def _cached_account_email() -> str:
+    """The email remembered from the last successful profile lookup, whatever token it was
+    fetched with. The old token is often unusable exactly when someone rebinds (a failed
+    refresh is why auth_status says logged_in:false), so it cannot be the only source."""
+    try:
+        with open(ACCOUNT_PROFILE_CACHE_PATH, "r", encoding="utf-8") as cf:
+            return str(json.load(cf).get("email") or "")
+    except Exception:
+        return ""
+
+
+def _prune_sessions_not_assigned():
+    """After binding another (or an unidentifiable) account: drop only the named sessions
+    whose endpoint the new account does not hold. A session still backed by a live
+    assignment is kept, and if the assignments cannot be read nothing is deleted (wake and
+    discover_url already ignore records without a live assignment)."""
+    _reset_state_cache()
+    try:
+        endpoints = {a.endpoint for a in state.client.list_assignments()}
+        existing = state.store.list()
+        if isinstance(existing, dict):
+            for name, sess in list(existing.items()):
+                if getattr(sess, "endpoint", None) not in endpoints:
+                    state.store.remove(name)
+    except Exception:
+        pass
+    _reset_state_cache()
+
+
 def cmd_auth_code(code: str):
     """Exchange the code and save the token. The named Colab sessions in sessions.json are
-    shared with colab-gpu-llm-service and point at live runtimes, so they are cleared only
-    when the code belongs to a different account than the one bound before; authorising the
-    same account again keeps them."""
+    shared with colab-gpu-llm-service and point at live runtimes. Authorising the same
+    account again keeps them all; for another account only those the new account does not
+    hold are dropped."""
     global _CHECKED_CREDS
     try:
         client_config = _load_client_config()
@@ -214,7 +243,9 @@ def cmd_auth_code(code: str):
                 flow.code_verifier = f.read().strip()
         flow.fetch_token(code=code.strip())
         creds = flow.credentials
-        old_email = _get_account_email()  # the token file still holds the previous account
+        # The token file still holds the previous account; if it cannot be used, fall back
+        # to the email remembered for it, before that cache is removed below.
+        old_email = _get_account_email() or _cached_account_email()
         for p in (ACCOUNT_PROFILE_CACHE_PATH, PKCE_VERIFIER_PATH):
             if os.path.exists(p):
                 try:
@@ -228,8 +259,8 @@ def cmd_auth_code(code: str):
         new_email = _get_account_email()
         if _same_account(old_email, new_email):
             _reset_state_cache()
-        else:  # another account, or one of the two could not be told: stale records must go
-            _clear_local_session_store()
+        else:  # another account, or one of the two could not be told
+            _prune_sessions_not_assigned()
         return cmd_auth_status()
     except Exception as e:
         print(json.dumps({"ok": False, "logged_in": False, "error": str(e)}))
@@ -548,13 +579,29 @@ def _on_wake_url(token: str) -> None:
         print("WAKE_LOG: 已启动后台保活（独立进程，关掉这个命令也不会中断）", flush=True)
 
 
-def cmd_wake(gpu_type: str = "G4", server_py_path: str = None, app_py_path: str = None):
+def _release_fresh_session(session: SessionState):
+    """Give back an instance this wake just allocated and could not deploy to, so a failed
+    wake does not leave an idle GPU billing. Never called for a reused instance."""
+    print(f"WAKE_LOG: ↩️ 部署失败，正在释放本次新分配的实例 [{session.accelerator}]，避免空转计费...", flush=True)
+    try:
+        state.client.unassign(session.endpoint)
+    except Exception as e:
+        print(f"WAKE_LOG: ⚠️ 释放新实例失败（{type(e).__name__}），请在 Colab 页面或点「释放全部实例」确认它已停。", flush=True)
+    try:
+        state.prune_session(session.name)
+    except Exception:
+        pass
+
+
+def cmd_wake(gpu_type: str = "G4", server_py_path: str = None, app_py_path: str = None) -> bool:
     """
     Wake/reuse Colab GPU VM, upload colab_yoga_server.py & runners, execute vm_boot.py.
+    Returns True only when the server printed its WAKE_URL. An instance allocated by this
+    call is released if the deployment then fails; a reused one is left alone.
     """
     if not _has_valid_token():
         print("WAKE_ERROR: 尚未授权登录 Google 账号，请先点击「🔑 绑定账号」", flush=True)
-        return
+        return False
 
     if not server_py_path:
         server_py_path = os.path.join(
@@ -562,13 +609,14 @@ def cmd_wake(gpu_type: str = "G4", server_py_path: str = None, app_py_path: str 
         )
     server_py_path = os.path.abspath(server_py_path)
 
+    fresh_session = None  # set only when this call allocated the instance
     try:
         session_name = "easycolab"
         print("WAKE_LOG: 🔍 正在检查账号下已有的 Colab 实例...", flush=True)
         local_sessions, assignments, synced = _safe_sync_sessions(with_status=True)
         if not synced:
             print("WAKE_ERROR: 暂时无法确认账号下的 Colab 实例（网络或授权问题），为避免重复开卡已停止，请稍后重试。", flush=True)
-            return
+            return False
         ep_map = {a.endpoint: a for a in assignments}
 
         named = [local_sessions.get(session_name)]
@@ -624,10 +672,11 @@ def cmd_wake(gpu_type: str = "G4", server_py_path: str = None, app_py_path: str 
                         "请稍后再点「唤醒实例并部署」；确定不用了再点「释放全部实例」。",
                         flush=True,
                     )
-                    return
+                    return False
 
         if not target_session:
             target_session = _allocate_fresh_session(session_name, gpu_type)
+            fresh_session = target_session
             if not _wait_for_runtime_ready(target_session, timeout_s=50):
                 print("WAKE_LOG: ⏳ 容器仍在初始化，继续尝试连接内核...", flush=True)
 
@@ -660,8 +709,7 @@ def cmd_wake(gpu_type: str = "G4", server_py_path: str = None, app_py_path: str 
             os.path.dirname(os.path.abspath(__file__)), "..", "server", "vm_boot.py"
         )
         if not os.path.isfile(vm_boot_path):
-            print(f"WAKE_ERROR: vm_boot.py 未找到: {vm_boot_path}", flush=True)
-            return
+            raise RuntimeError(f"vm_boot.py 未找到: {vm_boot_path}")
 
         with open(vm_boot_path, "r", encoding="utf-8") as f:
             boot_code = f.read()
@@ -675,18 +723,24 @@ def cmd_wake(gpu_type: str = "G4", server_py_path: str = None, app_py_path: str 
             state.store.add(target_session)
 
         hook_called = False
+        got_url = False
+        boot_errors: list[str] = []  # printed after a fresh instance is released, not before
 
         def _handle_output_item(out):
-            nonlocal hook_called
+            nonlocal hook_called, got_url
             hook_called = True
             if isinstance(out, dict):
                 if "text" in out:
                     for line in str(out["text"]).splitlines():
+                        if line.startswith("WAKE_ERROR:"):
+                            boot_errors.append(line)
+                            continue
                         if line.startswith("WAKE_URL:"):
+                            got_url = True
                             _on_wake_url(api_token)
                         print(line, flush=True)
                 elif out.get("output_type") == "error":
-                    print("WAKE_ERROR: " + str(out.get("evalue", "Execution error")), flush=True)
+                    boot_errors.append("WAKE_ERROR: " + str(out.get("evalue", "Execution error")))
 
         def _run_boot_on_runtime(use_saved_kernel: bool):
             rt = ColabRuntime(
@@ -723,8 +777,23 @@ def cmd_wake(gpu_type: str = "G4", server_py_path: str = None, app_py_path: str 
             for out in outputs:
                 _handle_output_item(out)
 
+        if got_url:  # the server is up and its URL went out; late errors are only reported
+            for line in boot_errors:
+                print(line, flush=True)
+            return True
+        if not boot_errors:
+            boot_errors.append("WAKE_ERROR: 部署脚本已结束，但没有拿到服务地址（WAKE_URL）")
+        if fresh_session is not None:
+            _release_fresh_session(fresh_session)
+        for line in boot_errors:
+            print(line, flush=True)
+        return False
+
     except Exception as e:
+        if fresh_session is not None:
+            _release_fresh_session(fresh_session)
         print(f"WAKE_ERROR: {str(e)}", flush=True)
+        return False
 
 
 _DISCOVER_CODE = r"""
@@ -1191,7 +1260,9 @@ def main(argv=None):
     elif args.cmd == "auth_code":
         cmd_auth_code(args.code)
     elif args.cmd == "wake":
-        cmd_wake(args.gpu, server_py_path=args.server_py, app_py_path=args.app_py)
+        # Only wake reports failure through its exit code; the JSON commands always exit 0
+        # and carry ok/error in their output, which is what the console parses.
+        return 0 if cmd_wake(args.gpu, server_py_path=args.server_py, app_py_path=args.app_py) else 1
     elif args.cmd == "stop_all":
         cmd_stop_all()
     elif args.cmd == "discover_url":
@@ -1201,8 +1272,9 @@ def main(argv=None):
 
 
 def run_cli(argv=None):
+    code = 0
     try:
-        main(argv)
+        code = main(argv) or 0
     finally:
         for stream in (sys.stdout, sys.stderr):
             try:
@@ -1210,7 +1282,7 @@ def run_cli(argv=None):
                     stream.flush()
             except Exception:
                 pass
-        os._exit(0)
+        os._exit(code)
 
 
 if __name__ == "__main__":

@@ -682,6 +682,9 @@ func (a *App) wake() {
 	gpu := a.gpu
 	a.logf("开始唤醒 Colab %s 实例并部署服务端…", gpu)
 	a.once("wake", func() {
+		// A failed wake exits non-zero after printing WAKE_ERROR; the exit status then only
+		// repeats what the user was already told.
+		reported := false
 		err := a.bridge.Stream(func(line string) {
 			a.apply(func() {
 				switch {
@@ -689,6 +692,7 @@ func (a *App) wake() {
 					a.setServerURL(strings.TrimSpace(strings.TrimPrefix(line, "WAKE_URL:")), false)
 					a.logf("云端服务已就绪")
 				case strings.HasPrefix(line, "WAKE_ERROR:"):
+					reported = true
 					a.notify("唤醒失败", strings.TrimSpace(strings.TrimPrefix(line, "WAKE_ERROR:")))
 				default:
 					a.logf("%s", strings.TrimSpace(strings.TrimPrefix(line, "WAKE_LOG:")))
@@ -697,7 +701,7 @@ func (a *App) wake() {
 		}, "wake", "--gpu", gpu)
 		a.apply(func() {
 			a.waking = false
-			if err != nil {
+			if err != nil && !reported {
 				a.notify("唤醒失败", err.Error())
 			}
 		})
