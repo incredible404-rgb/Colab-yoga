@@ -21,9 +21,49 @@
 | `console/` | 本机 | `Colab-yoga.exe`：Go + [MyGo](https://github.com/egoist/mygo) 原生界面，常驻托盘 |
 | `bridge/` | 本机 | `colab_yoga_bridge.py`：Google 账号、唤醒、找回地址、释放、后台保活（keeper） |
 | `server/` | Colab VM | `colab_yoga_server.py`：HTTP API、闲置看门狗、MCP 转发；`vm_boot.py`：唤醒时在 VM 内核里执行 |
-| `tools/` | 本机 | `install.py`：检查、构建、安装、快捷方式、配置迁移 |
+| `tools/` | 本机 | `install.py`：检查、构建、准备运行时与依赖、安装、快捷方式、配置迁移；`package.py`：打免安装包 |
 
 各部分之间的约定（目录布局、API、状态字段、保活规则）见 [docs/architecture.md](docs/architecture.md)。
+
+## 部署
+
+两种方式，都不依赖任何别的软件的安装目录；运行时的 Python 和依赖由 Colab-yoga 自己带。
+
+### 方式一：下载免安装包
+
+1. 在 [Releases](https://github.com/incredible404-rgb/Colab-yoga/releases) 下载 `Colab-yoga-<版本>-windows-amd64.zip`（旁边有 `.sha256`）。
+2. 解压到任意位置，运行里面的 `Colab-yoga.exe`。不需要另外安装 Python；整个文件夹可以整体移动，但不要把 exe 单独拿出去。
+3. 设置和状态保存在 `%LOCALAPPDATA%\Colab-yoga`，不在解压目录里。免安装包不建快捷方式、不写注册表，删掉文件夹即卸载。
+4. 要启动模型，需要把 `colab_kernel_runners.json`（colab-gpu-llm-service 的 `colab_kernel.py` 导出，含 API 密钥）放在 `Colab-yoga.exe` 旁边。包里不带这个文件。
+
+### 方式二：从源码安装
+
+前置：Windows 10/11 x64；[Go](https://go.dev/dl/) 1.27+；[PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows)（`pwsh`，建快捷方式和管理进程用）；[python.org](https://www.python.org/downloads/windows/) 的 Python 3.12（要带 pip，只用来跑安装脚本和 pip）。
+
+```bash
+git clone https://github.com/incredible404-rgb/Colab-yoga.git
+cd Colab-yoga
+py -3.12 tools/install.py
+```
+
+这一条命令会：
+
+- 检查（语法、`go vet`、Go 测试、bridge 与 server 的单测），再构建 `Colab-yoga.exe`；
+- 下载 python.org 的 Windows 嵌入式 CPython 3.12.10 到 `%LOCALAPPDATA%\Programs\Colab-yoga\runtime`，校验 SHA-256；已有 `runtime\` 时不重复下载（离线时用 `--embed-zip <文件>` 指向同一个压缩包）；
+- 用宿主 Python 的 pip，按 [bridge/requirements.txt](bridge/requirements.txt) 把依赖装进 `site-packages\`：版本锁定、逐个 wheel 校验哈希、只装二进制包，目标固定为 CPython 3.12 / win_amd64，所以宿主 Python 不必是 3.12（不用 uv）；
+- 放好 `bridge\`、`server\`，建开始菜单和桌面快捷方式，并用自带的运行时做一次 bridge 自检。
+
+重复运行就是升级：依赖版本没变就不会重新安装，正在运行的管理台会先关掉、装完再打开。想先看会做什么：加 `--dry-run`；想在别处试一遍：`--root <目录>`。
+
+从早先的 EasyColab 迁移时，安装脚本会一次性把旧的 `settings.json` 复制过来，把旧目录里较新的 `colab_kernel_runners.json` 迁到新安装目录，再删掉 `%LOCALAPPDATA%\Programs\EasyColab` 里的旧兼容层（目录里只有联接、转发脚本、exe 副本时才会删，其他情况原样保留）。
+
+### 自己打免安装包
+
+```bash
+py -3.12 tools/package.py --out <仓库之外的目录>
+```
+
+按安装同样的流程在临时目录里组好，压成 `Colab-yoga-<版本>-windows-amd64.zip`（同目录有 `.sha256`），并审计内容：不含 `colab_kernel_runners.json`、`settings.json`、`keeper.json`、token 或凭据类文件、`.pyc`、密钥特征字符串，发现就删掉 zip 并报错。
 
 ## 日常使用
 
@@ -34,23 +74,21 @@
 
 ## 开发
 
-源码在 `%LOCALAPPDATA%\Programs\Colab-yoga\repo`，安装目录是它的上一级。需要 Go 1.27+（MyGo CLI 已在 `console/go.mod` 里固定版本）。
+源码放在哪里都行（本机的开发副本在 `%LOCALAPPDATA%\Programs\Colab-yoga\repo`）。需要 Go 1.27+（MyGo CLI 已在 `console/go.mod` 里固定版本）。
 
 ```bash
-# 全部检查：AST、go vet、go test、bridge 和 server 的单测（server 测试的 venv 第一次会自动创建）
-runtime/python.exe -X utf8 tools/install.py --check
+# 全部检查：AST、go vet、go test、bridge 和 server 的单测（运行时、依赖和 server 测试的 venv 第一次会自动准备）
+py -3.12 tools/install.py --check
 # 检查、构建、安装到本机，并重新打开正在运行的管理台
-runtime/python.exe -X utf8 tools/install.py
+py -3.12 tools/install.py
 ```
+
+装好之后，也可以直接用安装目录里的运行时跑：`runtime/python.exe -X utf8 tools/install.py`（它自己没有 pip，只在依赖已经就位时可用）。
 
 - 截图自检：`cd console && SNAP_DIR=<目录> go test -run Snapshots`，会输出深色、浅色、多种尺寸、各种状态的 PNG。
 - 动效：都在 `console/motion.go`。位移走弹簧（中途再点会顺着原速度转向），颜色和透明度走短曲线，系统开了「减少动画」时位移直接到位；脉冲和流光只在唤醒、释放、装载、推理时出现，静止时窗口不画帧（`TestIdleWindowIsStill` 守着）。动画中间帧截图：`cd console && SNAP_DIR=<目录> go test -run MotionSnapshots`。
 - 图标：`cd console && go run ./cmd/makeicon`，用 MyGo 的画笔生成 `resources/icon.png` 和 `tray.png`。
 - 改了 `server/` 要重新唤醒才会生效：在「连接与账号」页点「重新部署服务端」，会复用同一台机器，:8081 上的模型和 MCP 转发都不会中断。
-
-## 旧路径兼容
-
-colab-gpu-llm-service 的 `colab_cli.py easycolab …` 和 `colab_kernel.py` 仍写死旧路径 `%LOCALAPPDATA%\Programs\EasyColab`。为此，安装脚本在那里保留了一个很小的兼容层：目录链接、一个转发脚本和一个 exe 副本，详见 docs/architecture.md。那边改成新路径后，这个兼容层就可以删掉。
 
 ## 许可
 

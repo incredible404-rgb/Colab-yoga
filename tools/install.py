@@ -1,37 +1,52 @@
 #!/usr/bin/env python3
 """
-Installer for Colab-yoga (replacing dev_sync.py).
-Builds the console executable, lays out the install directory per architecture contract,
-migrates settings, sets up legacy compatibility shim (junctions, forwarder colab_bridge.py),
-manages Windows shortcuts, and gracefully closes/restarts the console GUI.
+Installer for Colab-yoga.
+
+Builds the console executable, prepares the bundled Python runtime and its packages
+(downloaded and pinned, nothing is copied from another application), lays out the install
+directory, migrates the old settings once, retires the old EasyColab compatibility layer
+if one is found, manages Windows shortcuts, and closes/restarts the console GUI.
+
+Run it with a Python that has pip (python.org 3.12 recommended); that Python only runs this
+script and pip. The installed app runs on its own runtime\\python.exe.
 
 Usage:
   python tools/install.py                 # Full install / sync
-  python tools/install.py --check         # Validation only (AST, go vet, tests)
+  python tools/install.py --check         # Prepare the runtime, run all checks, stop
   python tools/install.py --dry-run       # Show actions without modifying files
   python tools/install.py --no-restart    # Do not close or launch the GUI
-  python tools/install.py --prune-legacy  # Verify new install, then prune legacy EasyColab dir
-  python tools/install.py --root <dir>    # Redirect all locations under sandbox root
+  python tools/install.py --root <dir>    # Redirect all locations under a sandbox root
+  python tools/install.py --embed-zip <f> # Use a local copy of the pinned embeddable zip
 """
 from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
+import zipfile
 from pathlib import Path
 
-EXCLUDED_SITE_PACKAGES_PREFIXES = (
-    "pyside6",
-    "shiboken6",
-    "pyarrow",
-    "__pycache__",
-)
+# The runtime: python.org's Windows embeddable CPython. 3.12.10 is the last 3.12 release
+# that ships Windows binaries. The SHA-256 was computed from the download, whose MD5
+# matches the one python.org lists for it (fe8ef205f2e9c3ba44d0cf9954e1abd3).
+PYTHON_VERSION = "3.12.10"
+PYTHON_TAG = "312"
+PYTHON_EMBED_URL = f"https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-embed-amd64.zip"
+PYTHON_EMBED_SHA256 = "4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3"
+
+# What may sit in the old EasyColab dir when it is only the compatibility layer that an
+# earlier Colab-yoga installer made there.
+LEGACY_TOP = {"easycolab.exe", "_internal", "repo"}
+LEGACY_INTERNAL = {"runtime", "site-packages", "colab_bridge.py", "colab_kernel_runners.json"}
 
 
 def run_ps1(script_content: str, args: list[str] | None = None, env: dict | None = None) -> subprocess.CompletedProcess:
@@ -43,7 +58,7 @@ def run_ps1(script_content: str, args: list[str] | None = None, env: dict | None
         tmp_name = tf.name
     try:
         cmd = ["pwsh", "-NoProfile", "-File", tmp_name] + (args or [])
-        return subprocess.run(cmd, capture_output=True, text=True, env=env)
+        return subprocess.run(cmd, capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
     finally:
         try:
             os.remove(tmp_name)
@@ -64,7 +79,7 @@ def desktop_folder() -> Path:
 
 
 class InstallPaths:
-    def __init__(self, root: str | None = None):
+    def __init__(self, root: str | None = None, cache_dir: str | Path | None = None):
         self.repo = Path(__file__).resolve().parent.parent
         self.is_sandbox = root is not None
         if root:
@@ -87,8 +102,9 @@ class InstallPaths:
             self.desktop = desktop_folder()
 
         self.target_exe = self.target_install / "Colab-yoga.exe"
-        self.legacy_exe = self.legacy_install / "EasyColab.exe"
         self.console_src = self.repo / "console"
+        # Downloaded archives are kept here, so a second install does not download again.
+        self.cache_dir = Path(cache_dir) if cache_dir else self.target_config / "cache"
 
 
 def find_go() -> str | None:
@@ -104,17 +120,43 @@ def find_go() -> str | None:
     return None
 
 
+def host_pythons() -> list[list[str]]:
+    """Command lines of Pythons on this PC that may have pip and venv, best first."""
+    out: list[list[str]] = [[sys.executable]]
+    if shutil.which("py"):
+        out.append(["py", "-3"])
+    if shutil.which("python"):
+        out.append(["python"])
+    return out
+
+
+def python_can(cmd: list[str], code: str) -> bool:
+    try:
+        r = subprocess.run(cmd + ["-c", code], capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0
+
+
+def find_pip_python() -> list[str] | None:
+    for cmd in host_pythons():
+        if python_can(cmd, "import pip"):
+            return cmd
+    return None
+
+
 def server_test_python(paths: InstallPaths) -> str | None:
     """A Python with fastapi for server/test_server.py. The bundled runtime has neither
-    fastapi nor pip, so a dev venv is made once under the config dir from a system
-    Python (COLAB_YOGA_DEV_PYTHON, else the `py` launcher)."""
+    fastapi nor pip, so a dev venv is made once under the config dir from a host Python
+    (COLAB_YOGA_DEV_PYTHON, else this one, else the `py` launcher)."""
     venv = paths.target_config / "dev-venv"
     vpy = venv / "Scripts" / "python.exe"
     reqs = paths.repo / "server" / "requirements-dev.txt"
     quiet = dict(stdin=subprocess.DEVNULL, timeout=600)
     if not vpy.is_file():
         base = os.environ.get("COLAB_YOGA_DEV_PYTHON")
-        cmd = [base] if base else ([shutil.which("py"), "-3"] if shutil.which("py") else None)
+        candidates = [[base]] if base else host_pythons()
+        cmd = next((c for c in candidates if python_can(c, "import venv, ensurepip")), None)
         if not cmd:
             return None
         print(f"Creating the server-test venv at {venv} ...")
@@ -129,17 +171,170 @@ def server_test_python(paths: InstallPaths) -> str | None:
 
 
 def find_python(paths: InstallPaths) -> str:
-    """Find bundled or available python executable."""
-    candidates = [
-        paths.target_install / "runtime" / "python.exe",
-        paths.legacy_install / "_internal" / "runtime" / "python.exe",
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "EasyColab" / "_internal" / "runtime" / "python.exe",
-        Path(sys.executable),
+    """The bundled runtime when it exists (it is made first), else the running Python."""
+    bundled = paths.target_install / "runtime" / "python.exe"
+    return str(bundled) if bundled.is_file() else sys.executable
+
+
+# ─── Runtime and packages (self-contained: downloaded, hash-pinned) ──────────────
+
+def sha256_of(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def download_verified(url: str, sha256: str, dest: Path) -> None:
+    """Download url to dest (via a .part file), keeping it only if its SHA-256 matches."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    last_err: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            print(f"runtime: downloading {url} (attempt {attempt}) ...")
+            req = urllib.request.Request(url, headers={"User-Agent": "Colab-yoga-installer"})
+            with urllib.request.urlopen(req, timeout=60) as resp, open(part, "wb") as out:
+                shutil.copyfileobj(resp, out, 1 << 20)
+            got = sha256_of(part)
+            if got != sha256:
+                raise RuntimeError(f"SHA-256 mismatch for {url}: expected {sha256}, got {got}")
+            os.replace(part, dest)
+            return
+        except Exception as e:  # network errors and hash mismatch both retry, then fail loudly
+            last_err = e
+            print(f"runtime: download failed: {e}")
+            time.sleep(2 * attempt)
+    try:
+        part.unlink()
+    except OSError:
+        pass
+    raise RuntimeError(f"could not download a verified {dest.name}: {last_err}\n"
+                       f"Download it yourself from {url} and pass it with --embed-zip.")
+
+
+def safe_extract(zip_path: Path, dest: Path) -> None:
+    root = dest.resolve()
+    with zipfile.ZipFile(zip_path) as z:
+        for name in z.namelist():
+            target = (dest / name).resolve()
+            if root != target and root not in target.parents:
+                raise RuntimeError(f"unsafe path in {zip_path.name}: {name}")
+        z.extractall(dest)
+
+
+def ensure_runtime(paths: InstallPaths, dry_run: bool, embed_zip: str | None = None) -> bool:
+    """Make <install>\\runtime from the pinned embeddable CPython unless it is there already.
+    Returns True when it had to be created."""
+    runtime = paths.target_install / "runtime"
+    if (runtime / "python.exe").is_file():
+        return False
+    if dry_run:
+        print(f"[dry-run] runtime: would download CPython {PYTHON_VERSION} embeddable into {runtime}")
+        return True
+    if embed_zip:
+        archive = Path(embed_zip)
+        got = sha256_of(archive)
+        if got != PYTHON_EMBED_SHA256:
+            raise RuntimeError(f"{archive} is not the pinned {PYTHON_EMBED_URL.rsplit('/', 1)[1]}: SHA-256 {got}")
+    else:
+        archive = paths.cache_dir / PYTHON_EMBED_URL.rsplit("/", 1)[1]
+        if not (archive.is_file() and sha256_of(archive) == PYTHON_EMBED_SHA256):
+            download_verified(PYTHON_EMBED_URL, PYTHON_EMBED_SHA256, archive)
+    paths.target_install.mkdir(parents=True, exist_ok=True)
+    staging = paths.target_install / "runtime.new"
+    if staging.exists():
+        _force_rmtree(staging)
+    staging.mkdir()
+    safe_extract(archive, staging)
+    # The embeddable zip ships its ._pth with "import site" commented out. Keep the install
+    # dir ("..") and site-packages on the path; site stays on so .pth files are processed.
+    (staging / f"python{PYTHON_TAG}._pth").write_text(
+        f"python{PYTHON_TAG}.zip\n.\n..\n..\\site-packages\nimport site\n", encoding="ascii"
+    )
+    if runtime.exists():
+        _force_rmtree(runtime)  # an incomplete earlier attempt: it has no python.exe
+    os.replace(staging, runtime)
+    print(f"runtime: CPython {PYTHON_VERSION} embeddable ready at {runtime}")
+    return True
+
+
+def norm_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def locked_pins(reqs: Path) -> dict[str, str]:
+    pins: dict[str, str] = {}
+    for line in reqs.read_text(encoding="utf-8").splitlines():
+        m = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s\\;]+)", line)
+        if m:
+            pins[norm_name(m.group(1))] = m.group(2)
+    return pins
+
+
+def installed_pins(site_packages: Path) -> dict[str, str]:
+    pins: dict[str, str] = {}
+    if not site_packages.is_dir():
+        return pins
+    for d in site_packages.glob("*.dist-info"):
+        m = re.match(r"^(.+?)-([^-]+)\.dist-info$", d.name)
+        if m:
+            pins[norm_name(m.group(1))] = m.group(2)
+    return pins
+
+
+def ensure_site_packages(paths: InstallPaths, dry_run: bool, before_replace=None) -> bool:
+    """Make <install>\\site-packages match bridge/requirements.txt, installing with the
+    pip of a host Python (cross-targeting CPython 3.12 / win_amd64, wheels only, every
+    wheel checked against its pinned hash). Returns True when it had to install."""
+    reqs = paths.repo / "bridge" / "requirements.txt"
+    sp = paths.target_install / "site-packages"
+    want = locked_pins(reqs)
+    if not want:
+        raise RuntimeError(f"{reqs} lists no pinned packages")
+    if installed_pins(sp) == want and (sp / "colab_cli").is_dir():
+        return False
+    if dry_run:
+        print(f"[dry-run] site-packages: would install {len(want)} pinned packages into {sp}")
+        return True
+    pip_py = find_pip_python()
+    if pip_py is None:
+        raise RuntimeError(
+            "site-packages needs installing but no Python with pip was found. Run this script "
+            "with python.org Python (3.12 recommended, e.g. 'py -3.12 tools/install.py') or put one on PATH."
+        )
+    staging = paths.target_install / "site-packages.new"
+    if staging.exists():
+        _force_rmtree(staging)
+    paths.target_install.mkdir(parents=True, exist_ok=True)
+    cmd = pip_py + [
+        "-m", "pip", "install", "--disable-pip-version-check", "--no-compile",
+        "--target", str(staging),
+        "--platform", "win_amd64", "--python-version", f"{PYTHON_TAG[0]}.{PYTHON_TAG[1:]}",
+        "--only-binary=:all:", "--no-deps", "--require-hashes", "-r", str(reqs),
     ]
-    for c in candidates:
-        if c.is_file():
-            return str(c)
-    return sys.executable
+    print(f"site-packages: installing {len(want)} pinned packages with {' '.join(pip_py)} -m pip ...")
+    r = subprocess.run(cmd, stdin=subprocess.DEVNULL)
+    if r.returncode != 0:
+        if staging.exists():
+            _force_rmtree(staging)
+        raise RuntimeError("pip install of bridge/requirements.txt failed (see the output above)")
+    # pip --target also writes console-script launchers into bin\; the bridge uses none.
+    for junk in ("bin", "__pycache__"):
+        if (staging / junk).exists():
+            _force_rmtree(staging / junk)
+    got = installed_pins(staging)
+    if got != want:
+        _force_rmtree(staging)
+        raise RuntimeError(f"pip installed {len(got)} packages, expected {len(want)} from the lock")
+    if before_replace:
+        before_replace()
+    if sp.exists():
+        _force_rmtree(sp)
+    os.replace(staging, sp)
+    print(f"site-packages: {len(want)} packages installed at {sp}")
+    return True
 
 
 # ─── Step (a): Check ─────────────────────────────────────────────────────────────
@@ -147,7 +342,7 @@ def find_python(paths: InstallPaths) -> str:
 def check_ast(repo: Path) -> bool:
     ok = True
     py_files: list[Path] = []
-    for d in (repo / "bridge", repo / "server"):
+    for d in (repo / "bridge", repo / "server", repo / "tools"):
         if d.is_dir():
             py_files.extend(d.glob("*.py"))
     for src in sorted(py_files):
@@ -186,7 +381,7 @@ def run_tests(paths: InstallPaths) -> bool:
     bridge_test = paths.repo / "bridge" / "test_bridge.py"
     if bridge_test.is_file():
         print(f"Running {bridge_test.relative_to(paths.repo)} with {py}...")
-        r = subprocess.run([py, "-X", "utf8", str(bridge_test)])
+        r = subprocess.run([py, "-X", "utf8", str(bridge_test)], stdin=subprocess.DEVNULL)
         if r.returncode != 0:
             ok = False
             print("bridge/test_bridge.py FAILED")
@@ -200,7 +395,7 @@ def run_tests(paths: InstallPaths) -> bool:
             print("server/test_server.py FAILED: no Python with fastapi (see server/requirements-dev.txt)")
             return False
         print(f"Running {server_test.relative_to(paths.repo)} with {spy}...")
-        r = subprocess.run([spy, "-X", "utf8", str(server_test)])
+        r = subprocess.run([spy, "-X", "utf8", str(server_test)], stdin=subprocess.DEVNULL)
         if r.returncode != 0:
             ok = False
             print("server/test_server.py FAILED")
@@ -252,7 +447,6 @@ def build_console(paths: InstallPaths, dry_run: bool) -> Path | None:
 def copy_file_if_changed(src: Path, dst: Path, dry_run: bool) -> bool:
     if dst.is_file():
         if src.stat().st_size == dst.stat().st_size:
-            # Check content
             if src.read_bytes() == dst.read_bytes():
                 return False
     if dry_run:
@@ -261,29 +455,6 @@ def copy_file_if_changed(src: Path, dst: Path, dry_run: bool) -> bool:
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
     return True
-
-
-def copy_tree_filtered(src_dir: Path, dst_dir: Path, exclude_prefixes: tuple[str, ...], dry_run: bool) -> int:
-    copied = 0
-    if not src_dir.is_dir():
-        return 0
-    for root, dirs, files in os.walk(src_dir):
-        rel_dir = Path(root).relative_to(src_dir)
-        # Check if current dir is excluded
-        top_name = rel_dir.parts[0].lower() if rel_dir.parts else ""
-        if any(top_name.startswith(p) for p in exclude_prefixes):
-            continue
-        # Filter subdirs in-place to avoid descending into excluded directories
-        dirs[:] = [d for d in dirs if not any(d.lower().startswith(p) for p in exclude_prefixes)]
-
-        for f in files:
-            if any(f.lower().startswith(p) for p in exclude_prefixes):
-                continue
-            src_file = Path(root) / f
-            dst_file = dst_dir / rel_dir / f
-            if copy_file_if_changed(src_file, dst_file, dry_run):
-                copied += 1
-    return copied
 
 
 def get_dir_size_mb(path: Path) -> float:
@@ -299,7 +470,28 @@ def get_dir_size_mb(path: Path) -> float:
     return total / (1024 * 1024)
 
 
-def layout_install_dir(paths: InstallPaths, built_exe: Path | None, dry_run: bool):
+def verify_bridge(install_dir: Path, local_appdata: Path | None, write_bytecode: bool = True) -> str:
+    """Import the bridge with the install's own runtime; returns its one-line OK message."""
+    py = install_dir / "runtime" / "python.exe"
+    bridge_dir = install_dir / "bridge"
+    flags = ["-X", "utf8"] + ([] if write_bytecode else ["-B"])
+    code = (
+        "import sys; sys.path.insert(0, sys.argv[1]); import colab_yoga_bridge; "
+        "print('bridge verified OK (Python %s)' % sys.version.split()[0])"
+    )
+    env = dict(os.environ)
+    if local_appdata is not None:
+        env["LOCALAPPDATA"] = str(local_appdata)
+    if not write_bytecode:
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+    r = subprocess.run([str(py)] + flags + ["-c", code, str(bridge_dir)],
+                       capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+    if r.returncode != 0:
+        raise RuntimeError(f"Runtime verification failed:\nstdout: {r.stdout}\nstderr: {r.stderr}")
+    return r.stdout.strip()
+
+
+def layout_install_dir(paths: InstallPaths, built_exe: Path | None, dry_run: bool, write_bytecode: bool = True):
     print(f"install: laying out target at {paths.target_install}...")
     if not dry_run:
         paths.target_install.mkdir(parents=True, exist_ok=True)
@@ -310,76 +502,30 @@ def layout_install_dir(paths: InstallPaths, built_exe: Path | None, dry_run: boo
     elif not paths.target_exe.is_file():
         print("warning: Colab-yoga.exe not present and not built")
 
-    # 2. bridge/
-    target_bridge = paths.target_install / "bridge"
-    if not dry_run:
-        target_bridge.mkdir(parents=True, exist_ok=True)
-    bridge_src = paths.repo / "bridge"
-    if bridge_src.is_dir():
-        for py in bridge_src.glob("*.py"):
+    # 2. bridge/ and 3. server/ (*.py except tests)
+    for sub in ("bridge", "server"):
+        src_dir = paths.repo / sub
+        if not src_dir.is_dir():
+            continue
+        if not dry_run:
+            (paths.target_install / sub).mkdir(parents=True, exist_ok=True)
+        for py in src_dir.glob("*.py"):
             if py.name.startswith("test_"):
                 continue
-            copy_file_if_changed(py, target_bridge / py.name, dry_run)
+            copy_file_if_changed(py, paths.target_install / sub / py.name, dry_run)
 
-    # 3. server/ (server/*.py except tests)
-    target_server = paths.target_install / "server"
+    # 4. The bundled runtime must run the bridge.
     if not dry_run:
-        target_server.mkdir(parents=True, exist_ok=True)
-    server_src = paths.repo / "server"
-    if server_src.is_dir():
-        for py in server_src.glob("*.py"):
-            if py.name.startswith("test_"):
-                continue
-            copy_file_if_changed(py, target_server / py.name, dry_run)
-
-    # 4. runtime\ and site-packages\
-    target_runtime = paths.target_install / "runtime"
-    target_sp = paths.target_install / "site-packages"
-
-    # Locate source runtime & site-packages (from legacy install or real local install)
-    legacy_runtime = paths.legacy_install / "_internal" / "runtime"
-    legacy_sp = paths.legacy_install / "_internal" / "site-packages"
-
-    if not legacy_runtime.is_dir() or not legacy_sp.is_dir():
-        # Fallback to real install if sandbox didn't supply them
-        real_local = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "EasyColab" / "_internal"
-        if (real_local / "runtime").is_dir() and (real_local / "site-packages").is_dir():
-            legacy_runtime = real_local / "runtime"
-            legacy_sp = real_local / "site-packages"
-
-    if not target_runtime.is_dir() and legacy_runtime.is_dir():
-        print(f"install: copying runtime from {legacy_runtime}...")
-        copy_tree_filtered(legacy_runtime, target_runtime, (), dry_run)
-    elif legacy_runtime.is_dir():
-        # Update changed files in runtime
-        copy_tree_filtered(legacy_runtime, target_runtime, (), dry_run)
-
-    if not target_sp.is_dir() and legacy_sp.is_dir():
-        print(f"install: copying site-packages from {legacy_sp} (excluding PySide6, shiboken6, pyarrow)...")
-        copy_tree_filtered(legacy_sp, target_sp, EXCLUDED_SITE_PACKAGES_PREFIXES, dry_run)
-    elif legacy_sp.is_dir():
-        copy_tree_filtered(legacy_sp, target_sp, EXCLUDED_SITE_PACKAGES_PREFIXES, dry_run)
-
-    if not dry_run and target_runtime.is_dir():
-        # Verify copied runtime
-        py = target_runtime / "python.exe"
-        if py.is_file():
-            verify_cmd = [
-                str(py), "-X", "utf8", "-c",
-                f"import sys; sys.path.insert(0, r'{target_bridge}'); import colab_yoga_bridge; print('bridge verified OK')"
-            ]
-            env = dict(os.environ)
-            if paths.is_sandbox:
-                env["LOCALAPPDATA"] = str(paths.local_appdata)
-            r = subprocess.run(verify_cmd, capture_output=True, text=True, env=env)
-            if r.returncode != 0:
-                raise RuntimeError(f"Runtime verification failed:\nstdout: {r.stdout}\nstderr: {r.stderr}")
-            print(f"install: {r.stdout.strip()}")
+        msg = verify_bridge(paths.target_install, paths.local_appdata if paths.is_sandbox else None, write_bytecode)
+        print(f"install: {msg}")
 
 
 # ─── Step (d): Migrate config once ───────────────────────────────────────────────
 
 def migrate_config(paths: InstallPaths, dry_run: bool):
+    """One-time: settings.json and keeper.json of an earlier EasyColab install are copied
+    into the Colab-yoga config dir when it has none of its own. Nothing reads the old
+    dir afterwards."""
     if not dry_run:
         paths.target_config.mkdir(parents=True, exist_ok=True)
     for fname in ("settings.json", "keeper.json"):
@@ -393,97 +539,10 @@ def migrate_config(paths: InstallPaths, dry_run: bool):
                 print(f"config: migrated {fname} to {paths.target_config}")
 
 
-# ─── Step (e): Legacy shim & prune ───────────────────────────────────────────────
-
-def create_junction(link_path: Path, target_path: Path, dry_run: bool):
-    if dry_run:
-        print(f"[dry-run] junction: {link_path} -> {target_path}")
-        return
-    link_path.parent.mkdir(parents=True, exist_ok=True)
-    ps = """
-param([string]$LinkPath, [string]$TargetPath)
-$parent = [System.IO.Path]::GetDirectoryName($LinkPath)
-if (-not (Test-Path $parent)) {
-    New-Item -ItemType Directory -Path $parent -Force | Out-Null
-}
-if (Test-Path $LinkPath) {
-    Remove-Item -Force $LinkPath
-}
-New-Item -ItemType Junction -Path $LinkPath -Target $TargetPath | Out-Null
-"""
-    res = run_ps1(ps, [str(link_path), str(target_path)])
-    if res.returncode != 0:
-        print(f"warning: failed to create junction {link_path} -> {target_path}: {res.stderr}")
-    else:
-        print(f"junction: {link_path} -> {target_path}")
-
-
-FORWARDER_CODE = '''#!/usr/bin/env python3
-"""
-Forwarder for legacy EasyColab callers (e.g. colab-gpu-llm-service).
-Redirects to Colab-yoga's bridge/colab_yoga_bridge.py.
-"""
-import os
-import sys
-
-def _find_bridge() -> str:
-    legacy_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    candidate = os.path.normpath(os.path.join(legacy_dir, "..", "Colab-yoga", "bridge", "colab_yoga_bridge.py"))
-    if os.path.isfile(candidate):
-        return candidate
-    local = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/AppData/Local")
-    candidate = os.path.join(local, "Programs", "Colab-yoga", "bridge", "colab_yoga_bridge.py")
-    if os.path.isfile(candidate):
-        return candidate
-    raise FileNotFoundError("Could not find colab_yoga_bridge.py at: " + candidate)
-
-if __name__ == "__main__":
-    bridge_py = _find_bridge()
-    bridge_dir = os.path.dirname(bridge_py)
-    if bridge_dir not in sys.path:
-        sys.path.insert(0, bridge_dir)
-    import colab_yoga_bridge
-    colab_yoga_bridge.run_cli()
-'''
-
-
-def verify_new_install_for_prune(paths: InstallPaths) -> bool:
-    py = paths.target_install / "runtime" / "python.exe"
-    bridge = paths.target_install / "bridge" / "colab_yoga_bridge.py"
-    if not py.is_file() or not bridge.is_file():
-        print("verify: python or bridge missing in target install")
-        return False
-    env = dict(os.environ)
-    if paths.is_sandbox:
-        env["LOCALAPPDATA"] = str(paths.local_appdata)
-
-    # 1. bridge import
-    cmd_import = [
-        str(py), "-X", "utf8", "-c",
-        f"import sys; sys.path.insert(0, r'{paths.target_install / 'bridge'}'); import colab_yoga_bridge"
-    ]
-    r1 = subprocess.run(cmd_import, capture_output=True, text=True, env=env)
-    if r1.returncode != 0:
-        print(f"verify: bridge import failed: {r1.stderr}")
-        return False
-
-    # 2. auth_status returns JSON
-    cmd_auth = [str(py), "-X", "utf8", str(bridge), "auth_status"]
-    r2 = subprocess.run(cmd_auth, capture_output=True, text=True, env=env)
-    try:
-        data = json.loads(r2.stdout.strip().splitlines()[-1])
-        if not isinstance(data, dict):
-            print("verify: auth_status output is not a JSON dict")
-            return False
-    except Exception as e:
-        print(f"verify: auth_status failed to parse as JSON: {e}, stdout: {r2.stdout}")
-        return False
-    print("verify: new install successfully verified (bridge import + auth_status JSON)")
-    return True
-
+# ─── Step (e): Retire the old EasyColab compatibility layer ──────────────────────
 
 def is_junction(path: Path) -> bool:
-    """os.path.isjunction needs Python 3.12; read the reparse-point attribute instead."""
+    """True for any reparse point (junction or symlink); os.path.isjunction needs 3.12."""
     try:
         attrs = os.lstat(path).st_file_attributes
     except (OSError, AttributeError):
@@ -491,22 +550,15 @@ def is_junction(path: Path) -> bool:
     return bool(attrs & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
 
 
-def replace_dir_with_junction(link: Path, target: Path, dry_run: bool):
-    if dry_run:
-        print(f"[dry-run] shim: replace real dir {link} with a junction to {target}")
-        return
-    aside = link.with_name(link.name + ".pre-colab-yoga")
-    link.rename(aside)
-    create_junction(link, target, dry_run)
-    probe = link / "python.exe" if link.name == "runtime" else link
-    if is_junction(link) and probe.exists():
-        _force_rmtree(aside)
-        print(f"shim: replaced {link} with a junction")
-        return
-    if link.exists() or is_junction(link):
-        os.rmdir(link)
-    aside.rename(link)
-    raise RuntimeError(f"junction {link} -> {target} did not work; the real directory was put back")
+def remove_link(path: Path):
+    """Remove a junction/symlink itself. os.rmdir on a directory reparse point deletes the
+    link and never its target; rmtree must not be used on a path that may be one."""
+    if not is_junction(path):
+        raise RuntimeError(f"refusing to unlink {path}: not a link")
+    try:
+        os.rmdir(path)
+    except OSError:
+        os.unlink(path)
 
 
 def _force_rmtree(path: Path):
@@ -519,82 +571,91 @@ def _force_rmtree(path: Path):
     shutil.rmtree(path, onerror=_onerror)
 
 
-def setup_legacy_shim(paths: InstallPaths, prune: bool, dry_run: bool):
-    internal = paths.legacy_install / "_internal"
-    if not dry_run:
-        internal.mkdir(parents=True, exist_ok=True)
+def classify_legacy(legacy: Path) -> tuple[bool, str]:
+    """(True, "") if the dir holds nothing but the compatibility layer that earlier
+    Colab-yoga installers made: EasyColab.exe (a copy), _internal with two links to the
+    runtime and packages, the bridge forwarder and the runner scripts, and a link to the
+    repo. An original EasyColab install (real runtime and site-packages dirs, anything
+    else) is not that."""
+    for item in legacy.iterdir():
+        low = item.name.lower()
+        if low not in LEGACY_TOP:
+            return False, f"unexpected entry {item.name}"
+        if low == "repo" and not is_junction(item):
+            return False, "repo is a real directory"
+        if low == "easycolab.exe" and (item.is_dir() or is_junction(item)):
+            return False, "EasyColab.exe is not a file"
+        if low == "_internal":
+            if is_junction(item) or not item.is_dir():
+                return False, "_internal is not a plain directory"
+            for sub in item.iterdir():
+                sl = sub.name.lower()
+                if sl not in LEGACY_INTERNAL:
+                    return False, f"unexpected entry _internal/{sub.name}"
+                if sl in ("runtime", "site-packages") and not is_junction(sub):
+                    return False, f"_internal/{sub.name} is a real directory"
+    return True, ""
 
-    # Copy EasyColab.exe from Colab-yoga.exe
-    if paths.target_exe.is_file():
-        copy_file_if_changed(paths.target_exe, paths.legacy_exe, dry_run)
 
-    # Write forwarder colab_bridge.py
-    forwarder_dst = internal / "colab_bridge.py"
+def migrate_runners(src: Path, dst: Path, dry_run: bool):
+    """Keep the newer colab_kernel_runners.json (it holds API keys: never printed)."""
+    if not src.is_file():
+        return
+    if dst.is_file() and dst.stat().st_mtime >= src.stat().st_mtime:
+        print("runners: the install's colab_kernel_runners.json is current; the old copy is dropped")
+        return
     if dry_run:
-        print(f"[dry-run] write forwarder: {forwarder_dst}")
-    else:
-        forwarder_dst.write_text(FORWARDER_CODE, encoding="utf-8")
-        print(f"forwarder: written {forwarder_dst}")
+        print(f"[dry-run] runners: would move {src} -> {dst}")
+        return
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    if sha256_of(src) != sha256_of(dst):
+        raise RuntimeError("runners: the copy differs from the original; the old dir is kept")
+    print(f"runners: colab_kernel_runners.json ({dst.stat().st_size} bytes) moved to {dst}")
 
-    # Prune legacy if requested
-    if prune:
-        if not dry_run:
-            if not verify_new_install_for_prune(paths):
-                raise RuntimeError("Pruning aborted: new install verification failed")
 
-        print("prune: removing legacy files while preserving runners JSON and repo...")
-        # Items to preserve in legacy_install
-        keep_in_legacy = {"EasyColab.exe", "_internal", "repo"}
-        keep_in_internal = {"colab_kernel_runners.json", "colab_bridge.py", "runtime", "site-packages"}
-
-        if paths.legacy_install.is_dir():
-            for item in paths.legacy_install.iterdir():
-                if item.name in keep_in_legacy:
-                    continue
-                if dry_run:
-                    print(f"[dry-run] prune: remove {item}")
-                else:
-                    if item.is_dir():
-                        _force_rmtree(item)
-                    else:
-                        try:
-                            os.chmod(item, 0o777)
-                        except Exception:
-                            pass
-                        item.unlink()
-
-        if internal.is_dir():
-            for item in internal.iterdir():
-                if item.name in keep_in_internal:
-                    continue
-                if dry_run:
-                    print(f"[dry-run] prune: remove {item}")
-                else:
-                    if item.is_dir():
-                        _force_rmtree(item)
-                    else:
-                        try:
-                            os.chmod(item, 0o777)
-                        except Exception:
-                            pass
-                        item.unlink()
-
-    # Junctions. A real directory (the pre-Colab-yoga runtime) is only replaced with
-    # --prune-legacy, and only after the junction is in place and works.
-    for name in ("runtime", "site-packages"):
-        link = internal / name
-        target = paths.target_install / name
-        if not link.exists() or is_junction(link):
-            create_junction(link, target, dry_run)
-        elif not prune:
-            print(f"shim: {link} is still a real directory; left in place (--prune-legacy replaces it)")
-        else:
-            replace_dir_with_junction(link, target, dry_run)
+def retire_legacy(paths: InstallPaths, dry_run: bool):
+    """Migrate the runner scripts, then delete the old Programs\\EasyColab compatibility
+    layer. Its links are unlinked first, so the real runtime and packages they point at
+    are never touched."""
+    legacy = paths.legacy_install
+    if not legacy.is_dir():
+        return
+    ok, why = classify_legacy(legacy)
+    if not ok:
+        print(f"legacy: {legacy} is not a Colab-yoga compatibility layer ({why}); left in place. "
+              "Nothing uses it any more; delete it yourself if you do not need EasyColab.")
+        return
+    new_ready = (paths.target_install / "runtime" / "python.exe").is_file() and \
+        (paths.target_install / "site-packages" / "colab_cli").is_dir() and \
+        (paths.target_install / "bridge" / "colab_yoga_bridge.py").is_file()
+    if not new_ready and not dry_run:
+        print("legacy: the new install is not complete; the old directory is kept")
+        return
+    migrate_runners(legacy / "_internal" / "colab_kernel_runners.json",
+                    paths.target_install / "colab_kernel_runners.json", dry_run)
+    if dry_run:
+        print(f"[dry-run] legacy: would unlink its links and delete {legacy}")
+        return
+    for link in (legacy / "repo", legacy / "_internal" / "runtime", legacy / "_internal" / "site-packages"):
+        if os.path.lexists(link):
+            remove_link(link)
+    if not (paths.target_install / "runtime" / "python.exe").is_file() or \
+            not (paths.target_install / "site-packages" / "colab_cli").is_dir():
+        raise RuntimeError("the install lost its runtime or packages while unlinking; stopping")
+    for root, dirs, files in os.walk(legacy):  # nothing left may be a link
+        for n in dirs + files:
+            if is_junction(Path(root) / n):
+                raise RuntimeError(f"{Path(root) / n} is still a link; not deleting {legacy}")
+    _force_rmtree(legacy)
+    if legacy.exists():
+        raise RuntimeError(f"could not delete {legacy} (a file in it is in use? close EasyColab.exe)")
+    print(f"legacy: removed the compatibility layer {legacy}")
 
 
 # ─── Step (f): Shortcuts ─────────────────────────────────────────────────────────
 
-def setup_shortcuts(paths: InstallPaths, prune: bool, dry_run: bool):
+def setup_shortcuts(paths: InstallPaths, dry_run: bool):
     if not paths.target_exe.is_file() and not dry_run:
         return
     ps_create = """
@@ -631,25 +692,33 @@ $s.Save()
             else:
                 print(f"warning: failed to create shortcut {lnk}: {res.stderr}")
 
-    if prune:
-        ps_prune = """
-param([string]$ProgramsDir)
-foreach ($name in @("EasyColab Yoga.lnk", "EasyColab.lnk")) {
-    $p = Join-Path $ProgramsDir $name
-    if (Test-Path $p) {
-        Remove-Item -Force $p
+    # Shortcuts that point into the retired EasyColab directory would dangle.
+    ps_prune = """
+param([string]$LegacyDir, [string[]]$Dirs)
+$sh = New-Object -ComObject WScript.Shell
+foreach ($d in $Dirs) {
+    if (-not (Test-Path $d)) { continue }
+    foreach ($f in Get-ChildItem -Path $d -Filter *.lnk -File) {
+        $t = $sh.CreateShortcut($f.FullName).TargetPath
+        if ($t -and $t.StartsWith($LegacyDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+            Remove-Item -Force $f.FullName
+            "removed $($f.FullName)"
+        }
     }
 }
 """
-        if dry_run:
-            print(f"[dry-run] shortcut: prune old shortcuts in {paths.start_menu}")
-        else:
-            run_ps1(ps_prune, [str(paths.start_menu)])
+    if dry_run:
+        print(f"[dry-run] shortcut: remove shortcuts pointing into {paths.legacy_install}")
+    else:
+        res = run_ps1(ps_prune, [str(paths.legacy_install), str(paths.start_menu), str(paths.desktop)])
+        for line in res.stdout.splitlines():
+            if line.strip():
+                print(f"shortcut: {line.strip()}")
 
 
 # ─── Step (g): Restart console & keeper ──────────────────────────────────────────
 
-def restart_keeper_if_needed(paths: InstallPaths, dry_run: bool):
+def stop_keeper(paths: InstallPaths, dry_run: bool):
     keeper_json = paths.target_config / "keeper.json"
     if not keeper_json.is_file():
         return
@@ -686,7 +755,9 @@ def get_gui_pids(exe_names: list[str]) -> list[int]:
     return pids
 
 
-CONSOLE_EXES = ["Colab-yoga.exe", "EasyColab Yoga.exe", "EasyColab-Yoga.exe"]
+# EasyColab.exe is the copy the old compatibility layer kept; it must not be running when
+# that directory is deleted.
+CONSOLE_EXES = ["Colab-yoga.exe", "EasyColab.exe"]
 
 
 def close_consoles(paths: InstallPaths, no_restart: bool, dry_run: bool) -> bool:
@@ -721,53 +792,62 @@ def relaunch_console(paths: InstallPaths, was_running: bool):
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Colab-yoga Installer")
-    parser.add_argument("--check", action="store_true", help="Perform checks only and exit")
+    parser.add_argument("--check", action="store_true", help="Prepare the runtime, run the checks and exit")
     parser.add_argument("--dry-run", action="store_true", help="Show actions without modifying files")
     parser.add_argument("--no-restart", action="store_true", help="Do not close or restart running GUI")
-    parser.add_argument("--prune-legacy", action="store_true", help="Prune the legacy EasyColab directory")
     parser.add_argument("--root", type=str, default=None, help="Sandbox root directory")
+    parser.add_argument("--embed-zip", type=str, default=None,
+                        help="Local copy of the pinned CPython embeddable zip (SHA-256 is still checked)")
     args = parser.parse_args(argv)
 
     paths = InstallPaths(args.root)
     print(f"Colab-yoga installer: target={paths.target_install}, sandbox={paths.is_sandbox}")
 
-    # (a) Check
-    checks_passed = run_all_checks(paths)
-    if not checks_passed:
-        print("Check phase FAILED")
-        return 1
-    if args.check:
-        print("Check phase PASSED (--check stops here)")
-        return 0
+    state = {"closed": False, "was_running": False}
 
-    # (b) Build console
-    built_exe = build_console(paths, args.dry_run)
+    def quiesce():
+        """Close the console and stop the keeper once, before anything in use is replaced."""
+        if state["closed"] or args.check:
+            return
+        state["closed"] = True
+        state["was_running"] = close_consoles(paths, args.no_restart, args.dry_run)
+        stop_keeper(paths, args.dry_run)
 
-    # (c) Lay out install directory (running consoles closed first, relaunched in (g))
-    was_running = close_consoles(paths, args.no_restart, args.dry_run)
-    layout_install_dir(paths, built_exe, args.dry_run)
+    try:
+        # The checks run on the bundled runtime, so it and its packages come first.
+        ensure_runtime(paths, args.dry_run, args.embed_zip)
+        ensure_site_packages(paths, args.dry_run, before_replace=quiesce)
 
-    # (d) Migrate config once
-    migrate_config(paths, args.dry_run)
+        # (a) Check
+        if not run_all_checks(paths):
+            print("Check phase FAILED")
+            return 1
+        if args.check:
+            print("Check phase PASSED (--check stops here)")
+            return 0
 
-    # (e) Legacy shim & prune
-    setup_legacy_shim(paths, args.prune_legacy, args.dry_run)
+        # (b) Build console
+        built_exe = build_console(paths, args.dry_run)
 
-    # (f) Shortcuts
-    setup_shortcuts(paths, args.prune_legacy, args.dry_run)
+        # (c) Lay out install directory (running consoles closed first, relaunched at the end)
+        quiesce()
+        layout_install_dir(paths, built_exe, args.dry_run)
 
-    # (g) Restart keeper & console
-    restart_keeper_if_needed(paths, args.dry_run)
-    relaunch_console(paths, was_running)
+        # (d) Migrate config once
+        migrate_config(paths, args.dry_run)
 
-    # Report sizes
+        # (e) Retire the old EasyColab compatibility layer, if any
+        retire_legacy(paths, args.dry_run)
+
+        # (f) Shortcuts
+        setup_shortcuts(paths, args.dry_run)
+    finally:
+        if not args.check:
+            relaunch_console(paths, state["was_running"])
+
     rt_mb = get_dir_size_mb(paths.target_install / "runtime")
     sp_mb = get_dir_size_mb(paths.target_install / "site-packages")
-    total_mb = rt_mb + sp_mb
-    print(
-        f"\nInstalled size: runtime={rt_mb:.1f} MB, site-packages={sp_mb:.1f} MB, "
-        f"total={total_mb:.1f} MB (vs legacy 283 MB, saved {283 - total_mb:.1f} MB)"
-    )
+    print(f"\nInstalled size: runtime={rt_mb:.1f} MB, site-packages={sp_mb:.1f} MB, total={rt_mb + sp_mb:.1f} MB")
     return 0
 
 

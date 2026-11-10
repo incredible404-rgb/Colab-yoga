@@ -115,7 +115,7 @@ func TestTrayOnlyPollsSlowlyAndNeverProbes(t *testing.T) {
 	}
 }
 
-func TestPathsAndLegacyFallback(t *testing.T) {
+func TestPaths(t *testing.T) {
 	local := t.TempDir()
 	p := pathsFor(local, filepath.Join(local, "Programs", "Colab-yoga"))
 	if !strings.HasSuffix(p.Bridge, filepath.Join("Colab-yoga", "bridge", "colab_yoga_bridge.py")) ||
@@ -126,20 +126,36 @@ func TestPathsAndLegacyFallback(t *testing.T) {
 	if p.runnersFile() != "" {
 		t.Error("no runner file exists yet")
 	}
-	legacy := p.Runners[1]
-	if err := os.MkdirAll(filepath.Dir(legacy), 0o755); err != nil {
+	_ = os.MkdirAll(filepath.Dir(p.Runners), 0o755)
+	_ = os.WriteFile(p.Runners, []byte("{}"), 0o644)
+	if p.runnersFile() != p.Runners || filepath.Dir(p.Runners) != p.AppDir {
+		t.Errorf("runners must live next to the install: %q", p.runnersFile())
+	}
+}
+
+// A release package is unzipped anywhere: the exe then runs against its own directory,
+// while its settings stay in %LOCALAPPDATA%\Colab-yoga.
+func TestPortableAppDir(t *testing.T) {
+	local := t.TempDir()
+	std := filepath.Join(local, "Programs", "Colab-yoga")
+	unzipped := filepath.Join(t.TempDir(), "Colab-yoga")
+	if got := appDirFor(local, unzipped); got != std {
+		t.Errorf("an exe without a bridge dir next to it uses the standard install: %q", got)
+	}
+	if got := appDirFor(local, ""); got != std {
+		t.Errorf("unknown exe dir: %q", got)
+	}
+	if err := os.MkdirAll(filepath.Join(unzipped, "bridge"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_ = os.WriteFile(legacy, []byte("{}"), 0o644)
-	if p.runnersFile() != legacy {
-		t.Errorf("legacy runners not found: %q", p.runnersFile())
+	_ = os.WriteFile(filepath.Join(unzipped, "bridge", "colab_yoga_bridge.py"), []byte("#"), 0o644)
+	if got := appDirFor(local, unzipped); got != unzipped {
+		t.Errorf("an exe with a bridge dir next to it runs from there: %q", got)
 	}
-	_ = os.MkdirAll(filepath.Dir(p.Runners[0]), 0o755)
-	_ = os.WriteFile(p.Runners[0], []byte("{}"), 0o644)
-	future := time.Now().Add(time.Hour)
-	_ = os.Chtimes(p.Runners[0], future, future)
-	if p.runnersFile() != p.Runners[0] {
-		t.Errorf("the newer runner file must win: %q", p.runnersFile())
+	p := pathsFor(local, unzipped)
+	if p.Python != filepath.Join(unzipped, "runtime", "python.exe") ||
+		p.Settings != filepath.Join(local, "Colab-yoga", "settings.json") {
+		t.Errorf("portable paths %+v", p)
 	}
 }
 

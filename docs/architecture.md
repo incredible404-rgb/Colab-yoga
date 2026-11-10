@@ -19,30 +19,43 @@ exactly as long as it is used. LLM only: no video, image, ComfyUI or Gradio API 
 
 ```
 Colab-yoga.exe
-runtime\python.exe, runtime\pythonw.exe   embedded CPython 3.12 (python312._pth: python312.zip, ".", "..", "..\site-packages")
-site-packages\                           only what the bridge imports
+runtime\python.exe, runtime\pythonw.exe   python.org embeddable CPython 3.12.10 (python312._pth: python312.zip, ".", "..", "..\site-packages")
+site-packages\                           the packages pinned in bridge/requirements.txt (51 wheels)
 bridge\colab_yoga_bridge.py
 server\colab_yoga_server.py, server\vm_boot.py
+colab_kernel_runners.json                 not part of the repo or a release; exported here by colab-gpu-llm-service
 ```
 
-Config and state: `%LOCALAPPDATA%\Colab-yoga\settings.json`, `keeper.json` (migrated once
-from `%LOCALAPPDATA%\EasyColab\`).
+The release zip is the same tree under a `Colab-yoga\` folder (plus README.txt, LICENSE, NOTICE,
+without `colab_kernel_runners.json`). The exe uses its own directory as the install when
+`bridge\colab_yoga_bridge.py` is next to it, so an unzipped package runs where it was unpacked;
+otherwise it falls back to `%LOCALAPPDATA%\Programs\Colab-yoga` (a dev build run from
+`console\dist`). Config and state stay in `%LOCALAPPDATA%\Colab-yoga` either way.
 
-Runner scripts (with real keys, never committed): `colab_kernel_runners.json`. Looked up at
-`<install>\colab_kernel_runners.json` and the legacy `%LOCALAPPDATA%\Programs\EasyColab\_internal\colab_kernel_runners.json`
-(where colab-gpu-llm-service's `colab_kernel.py` exports it); the newer of the two wins.
+Self-contained setup (`tools/install.py`, `tools/package.py`): nothing is copied from another
+application. `runtime\` is made from the CPython embeddable zip pinned by URL and SHA-256 in
+`tools/install.py`; `site-packages\` is installed from `bridge/requirements.txt` (versions and
+wheel hashes pinned; `pip install --target --platform win_amd64 --python-version 3.12
+--only-binary=:all: --no-deps --require-hashes`) with a host Python's pip. An existing `runtime\`
+or a `site-packages\` that already matches the lock is left alone. Bumping Python means changing
+the URL and hash in `install.py`; bumping a package means changing `bridge/requirements.txt`.
 
-### Legacy path shim (`%LOCALAPPDATA%\Programs\EasyColab`)
+Config and state: `%LOCALAPPDATA%\Colab-yoga\settings.json`, `keeper.json`. An earlier
+install's `%LOCALAPPDATA%\EasyColab\settings.json` and `keeper.json` are copied once, only when
+the new ones do not exist; nothing reads the old directory afterwards.
 
-colab-gpu-llm-service's `colab_cli.py easycolab …` and `colab_kernel.py` hard-code the old
-path, and that project is not edited from here. The old dir keeps only:
+Runner scripts (with real keys, never committed or packaged): `<install>\colab_kernel_runners.json`
+only, where colab-gpu-llm-service's `colab_kernel.py` exports it. The console and the bridge look
+nowhere else.
 
-- `_internal\runtime`, `_internal\site-packages`: directory junctions to the new ones;
-- `_internal\colab_bridge.py`: a forwarder that runs `bridge\colab_yoga_bridge.py` with the same arguments (`--app-py` ignored);
-- `_internal\colab_kernel_runners.json`: left where `colab_kernel.py` writes it;
-- `EasyColab.exe`: a copy of `Colab-yoga.exe` (it finds the real install when its own dir has no `bridge\`).
+### Retired: the EasyColab compatibility layer
 
-Retire the shim once colab-gpu-llm-service points at the new path.
+Earlier installers kept `%LOCALAPPDATA%\Programs\EasyColab` (junctions to `runtime` and
+`site-packages`, a `colab_bridge.py` forwarder, an `EasyColab.exe` copy, a link to the repo) for
+colab-gpu-llm-service's old hard-coded path. That project now uses `Programs\Colab-yoga`, so the
+installer no longer creates any of it and, when it finds a directory that holds only those
+pieces, moves the newer `colab_kernel_runners.json` into the install and deletes it. Links are
+removed as links (never recursed into); a directory that is not exactly that layout is left alone.
 
 ## VM side
 

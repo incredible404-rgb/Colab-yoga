@@ -461,37 +461,11 @@ def _allocate_fresh_session(session_name: str, gpu_type: str) -> SessionState:
 
 
 def resolve_runners_path() -> str | None:
-    """
-    Look up colab_kernel_runners.json per architecture contract:
-    Newer of <install>/colab_kernel_runners.json and the legacy
-    %LOCALAPPDATA%/Programs/EasyColab/_internal/colab_kernel_runners.json
-    """
+    """<install>/colab_kernel_runners.json, where colab-gpu-llm-service's colab_kernel.py
+    exports it; None if it is not there."""
     install_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    install_path = os.path.join(install_dir, "colab_kernel_runners.json")
-
-    local_app_data = (
-        os.environ.get("LOCALAPPDATA")
-        or os.environ.get("APPDATA")
-        or os.path.expanduser("~/AppData/Local")
-    )
-    legacy_path = os.path.join(
-        local_app_data, "Programs", "EasyColab", "_internal", "colab_kernel_runners.json"
-    )
-
-    has_install = os.path.isfile(install_path)
-    has_legacy = os.path.isfile(legacy_path)
-
-    if has_install and has_legacy:
-        return (
-            install_path
-            if os.path.getmtime(install_path) >= os.path.getmtime(legacy_path)
-            else legacy_path
-        )
-    if has_install:
-        return install_path
-    if has_legacy:
-        return legacy_path
-    return None
+    path = os.path.join(install_dir, "colab_kernel_runners.json")
+    return path if os.path.isfile(path) else None
 
 
 def cmd_wake(gpu_type: str = "G4", server_py_path: str = None, app_py_path: str = None):

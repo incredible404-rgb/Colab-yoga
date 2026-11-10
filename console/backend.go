@@ -37,9 +37,9 @@ type Paths struct {
 	ConfigDir string // %LOCALAPPDATA%\Colab-yoga
 	Settings  string
 	Keeper    string
-	// Runner scripts (real keys): the install's copy and the legacy path that
-	// colab-gpu-llm-service's colab_kernel.py exports to; the newer wins.
-	Runners []string
+	// Runner scripts with real keys, exported next to the install by
+	// colab-gpu-llm-service's colab_kernel.py; never part of a release package.
+	Runners string
 }
 
 func findPaths() Paths {
@@ -48,15 +48,21 @@ func findPaths() Paths {
 		home, _ := os.UserHomeDir()
 		local = filepath.Join(home, "AppData", "Local")
 	}
-	appDir := filepath.Join(local, "Programs", "Colab-yoga")
-	// The exe's own dir when it is an install; a copy in the legacy shim dir has no
-	// bridge\ next to it and falls back to the real install.
+	exeDir := ""
 	if exe, err := os.Executable(); err == nil {
-		if d := filepath.Dir(exe); fileExists(filepath.Join(d, "bridge", "colab_yoga_bridge.py")) {
-			appDir = d
-		}
+		exeDir = filepath.Dir(exe)
 	}
-	return pathsFor(local, appDir)
+	return pathsFor(local, appDirFor(local, exeDir))
+}
+
+// appDirFor is the exe's own directory when it holds the bridge (an installed or an
+// unzipped release package, which runs wherever it was unpacked), else the standard
+// install, so a dev build run from console\dist still finds its bridge and runtime.
+func appDirFor(local, exeDir string) string {
+	if exeDir != "" && fileExists(filepath.Join(exeDir, "bridge", "colab_yoga_bridge.py")) {
+		return exeDir
+	}
+	return filepath.Join(local, "Programs", "Colab-yoga")
 }
 
 func pathsFor(local, appDir string) Paths {
@@ -69,22 +75,16 @@ func pathsFor(local, appDir string) Paths {
 		ConfigDir: cfg,
 		Settings:  filepath.Join(cfg, "settings.json"),
 		Keeper:    filepath.Join(cfg, "keeper.json"),
-		Runners: []string{
-			filepath.Join(appDir, "colab_kernel_runners.json"),
-			filepath.Join(local, "Programs", "EasyColab", "_internal", "colab_kernel_runners.json"),
-		},
+		Runners:   filepath.Join(appDir, "colab_kernel_runners.json"),
 	}
 }
 
-// runnersFile is the newer of the candidate runner files, "" if none exists.
+// runnersFile is the runner script file, "" if it does not exist.
 func (p Paths) runnersFile() string {
-	best, bestT := "", time.Time{}
-	for _, f := range p.Runners {
-		if st, err := os.Stat(f); err == nil && st.ModTime().After(bestT) {
-			best, bestT = f, st.ModTime()
-		}
+	if fileExists(p.Runners) {
+		return p.Runners
 	}
-	return best
+	return ""
 }
 
 func fileExists(p string) bool {

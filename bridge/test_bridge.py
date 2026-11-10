@@ -26,13 +26,9 @@ if str(BRIDGE_DIR) not in sys.path:
 try:
     import colab_cli  # noqa: F401
 except ImportError:
-    for candidate in [
-        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Colab-yoga\site-packages"),
-        os.path.expandvars(r"%LOCALAPPDATA%\Programs\EasyColab\_internal\site-packages"),
-    ]:
-        if os.path.isdir(candidate) and candidate not in sys.path:
-            sys.path.insert(0, candidate)
-            break
+    candidate = os.path.join(os.path.dirname(os.path.dirname(str(BRIDGE_DIR))), "site-packages")  # install dir (repo is in it)
+    if os.path.isdir(candidate) and candidate not in sys.path:
+        sys.path.insert(0, candidate)
 
 import colab_yoga_bridge as cb
 
@@ -294,60 +290,44 @@ class UrlParsingTests(unittest.TestCase):
         self.assertIn("colab_yoga_server.py", self.cb._KEEPER_CODE)
 
 
-class RunnerSelectionTests(unittest.TestCase):
-    """Tests that runner-file selection picks the newer file per the architecture contract."""
+class RunnerPathTests(unittest.TestCase):
+    """Only the file next to the install counts; nothing is looked up at an older path."""
 
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
         self.install_dir = self.tmp / "install"
-        self.legacy_dir = self.tmp / "legacy" / "Programs" / "EasyColab" / "_internal"
-        self.install_dir.mkdir(parents=True)
-        self.legacy_dir.mkdir(parents=True)
-
         self.install_file = self.install_dir / "colab_kernel_runners.json"
-        self.legacy_file = self.legacy_dir / "colab_kernel_runners.json"
-
         self.bridge_py = self.install_dir / "bridge" / "colab_yoga_bridge.py"
         self.bridge_py.parent.mkdir(parents=True)
 
     def _call_resolve(self) -> str | None:
         orig_file = cb.__file__
-        orig_env = os.environ.get("LOCALAPPDATA")
         try:
             cb.__file__ = str(self.bridge_py)
-            os.environ["LOCALAPPDATA"] = str(self.tmp / "legacy")
             return cb.resolve_runners_path()
         finally:
             cb.__file__ = orig_file
+
+    def test_missing(self) -> None:
+        self.assertIsNone(self._call_resolve())
+
+    def test_install_copy(self) -> None:
+        self.install_file.write_text("{}", encoding="utf-8")
+        self.assertEqual(self._call_resolve(), str(self.install_file))
+
+    def test_old_easycolab_path_is_ignored(self) -> None:
+        old = self.tmp / "local" / "Programs" / "EasyColab" / "_internal"
+        old.mkdir(parents=True)
+        (old / "colab_kernel_runners.json").write_text("{}", encoding="utf-8")
+        orig_env = os.environ.get("LOCALAPPDATA")
+        os.environ["LOCALAPPDATA"] = str(self.tmp / "local")
+        try:
+            self.assertIsNone(self._call_resolve())
+        finally:
             if orig_env is None:
                 os.environ.pop("LOCALAPPDATA", None)
             else:
                 os.environ["LOCALAPPDATA"] = orig_env
-
-    def test_neither_exists(self) -> None:
-        self.assertIsNone(self._call_resolve())
-
-    def test_only_install_exists(self) -> None:
-        self.install_file.write_text("{}", encoding="utf-8")
-        self.assertEqual(self._call_resolve(), str(self.install_file))
-
-    def test_only_legacy_exists(self) -> None:
-        self.legacy_file.write_text("{}", encoding="utf-8")
-        self.assertEqual(self._call_resolve(), str(self.legacy_file))
-
-    def test_both_exist_install_is_newer(self) -> None:
-        self.legacy_file.write_text("{}", encoding="utf-8")
-        os.utime(self.legacy_file, (1000, 1000))
-        self.install_file.write_text("{}", encoding="utf-8")
-        os.utime(self.install_file, (2000, 2000))
-        self.assertEqual(self._call_resolve(), str(self.install_file))
-
-    def test_both_exist_legacy_is_newer(self) -> None:
-        self.install_file.write_text("{}", encoding="utf-8")
-        os.utime(self.install_file, (1000, 1000))
-        self.legacy_file.write_text("{}", encoding="utf-8")
-        os.utime(self.legacy_file, (2000, 2000))
-        self.assertEqual(self._call_resolve(), str(self.legacy_file))
 
 
 class AuthStatusTests(unittest.TestCase):
