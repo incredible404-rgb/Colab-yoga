@@ -11,10 +11,7 @@ import (
 )
 
 func (a *App) dashboard(c *ui.Context, p Palette) {
-	ui.Column(c).Gap(6).Children(func() {
-		ui.Text(c, "仪表盘").Font(fontSerif).FontSize(34)
-		ui.Text(c, a.dashboardSubtitle()).FontSize(14).TextColor(p.Text3)
-	})
+	pageHeader(c, p, "仪表盘", a.dashboardSubtitle())
 	// Two cards side by side, wrapping under each other when the window is narrow.
 	ui.Row(c).Wrap().Gap(20).AlignItems(ui.Stretch).Children(func() {
 		a.billCard(c, p).Basis(420).Grow(1).Shrink(1).MinWidth(340)
@@ -42,7 +39,7 @@ func (a *App) billCard(c *ui.Context, p Palette) ui.Element {
 		burn = st.Burn
 	}
 	billing := a.connected || a.acct.Active > 0
-	return card(c, p, "算力账单", "余额与扣费取自 Colab 官方账本", func() {
+	return card(c, p, 1, "算力账单", "余额与扣费取自 Colab 官方账本", func() {
 		if billing && burn > 0 {
 			pill(c, "计费中", p.Accent)
 		} else {
@@ -57,12 +54,12 @@ func (a *App) billCard(c *ui.Context, p Palette) ui.Element {
 				hours = fmt.Sprintf("按当前速率约可用 %.0f 小时", a.acct.Balance/burn)
 			}
 		}
-		metric(c, p, "账户余额", bal, hours, 38, p.Text)
+		metricRoll(c, p, "账户余额", bal, hours, 38, p.Text, numericDown)
 		ui.Row(c).Wrap().GapX(36).GapY(14).Children(func() {
-			metric(c, p, "扣费速率", fmt.Sprintf("%.2f CU/h", burn), "", 20, map[bool]ui.Color{true: p.Accent, false: p.Text}[burn > 0])
+			metricRoll(c, p, "扣费速率", fmt.Sprintf("%.2f CU/h", burn), "", 20, map[bool]ui.Color{true: p.Accent, false: p.Text}[burn > 0], numeric)
 			if st != nil && a.connected {
-				metric(c, p, "本次运行", hms(st.Uptime), "", 20, p.Text).Tooltip("从这台 GPU 分配给你（开始计费）算起")
-				metric(c, p, "本次已花", fmt.Sprintf("%.1f CU", st.SessionCU), "", 20, p.Text)
+				metricRoll(c, p, "本次运行", hms(st.Uptime), "", 20, p.Text, numeric).Tooltip("从这台 GPU 分配给你（开始计费）算起")
+				metricRoll(c, p, "本次已花", fmt.Sprintf("%.1f CU", st.SessionCU), "", 20, p.Text, numeric)
 			} else {
 				metric(c, p, "本次运行", "—", "", 20, p.Text3)
 				metric(c, p, "本次已花", "—", "", 20, p.Text3)
@@ -70,17 +67,14 @@ func (a *App) billCard(c *ui.Context, p Palette) ui.Element {
 		})
 		a.idleBlock(c, p)
 		ui.Row(c).Gap(8).Children(func() {
-			k := a.keeper
-			if k.Alive {
-				dot(c, p.Success, 7)
-				ui.Text(c, "后台保活运行中：关掉这个窗口也不影响 GPU").FontSize(13).TextColor(p.Text2)
+			col, text := p.Muted, "没有实例时不需要保活"
+			if a.keeper.Alive {
+				col, text = p.Success, "后台保活运行中：关掉这个窗口也不影响 GPU"
 			} else if a.connected {
-				dot(c, p.Warning, 7)
-				ui.Text(c, "后台保活没在跑，几十秒内会自动启动").FontSize(13).TextColor(p.Text2)
-			} else {
-				dot(c, p.Muted, 7)
-				ui.Text(c, "没有实例时不需要保活").FontSize(13).TextColor(p.Text3)
+				col, text = p.Warning, "后台保活没在跑，几十秒内会自动启动"
 			}
+			dot(c, col, 7)
+			ui.Text(c, text).FontSize(13).TextColor(p.Text2).ContentTransition(crossfade)
 		})
 	})
 }
@@ -102,7 +96,7 @@ func (a *App) idleBlock(c *ui.Context, p Palette) {
 				rem := int(st.IdleRemaining)
 				text = fmt.Sprintf("闲置 %d 分 %02d 秒后自动释放（网页 / Magpie / MCP 的对话都算在用）", rem/60, rem%60)
 			}
-			ui.Text(c, text).FontSize(13).TextColor(p.Text2).Grow(1).Shrink(1)
+			ui.Text(c, text).FontSize(13).TextColor(p.Text2).Grow(1).Shrink(1).ContentTransition(numericDown)
 			outlineButton(c.Key("touch-bill"), p, "续时").Padding(4, 12).Disabled(!a.connected).OnClick(a.touch)
 		})
 		frac := 0.0
@@ -113,7 +107,7 @@ func (a *App) idleBlock(c *ui.Context, p Palette) {
 		if frac < 0.2 {
 			col = p.Danger
 		}
-		ui.Progress(c, clamp01(frac)).TextColor(col).Background(p.Hover).Label("距离自动释放")
+		gauge(c, p, "idle", frac, col, "距离自动释放")
 	})
 }
 
@@ -129,7 +123,7 @@ func (a *App) modelCard(c *ui.Context, p Palette) ui.Element {
 	} else {
 		busy = a.access.Llama.SlotsBusy
 	}
-	return card(c, p, "当前模型", "云端 :8081 正在为网页、Magpie 和 MCP 服务的模型", func() {
+	return card(c, p, 2, "当前模型", "云端 :8081 正在为网页、Magpie 和 MCP 服务的模型", func() {
 		switch {
 		case loading:
 			pill(c, "加载中", p.Warning)
@@ -144,21 +138,24 @@ func (a *App) modelCard(c *ui.Context, p Palette) ui.Element {
 		}
 	}, func() {
 		m := modelByID(id)
+		// One headline that morphs letter by letter as the model changes (Magic Move).
+		head, size, col := "云端还没有模型在跑", float32(22), p.Text2
 		switch {
 		case online && m != nil:
-			ui.Text(c, m.Name).Font(fontSerif).FontSize(26)
+			head, size, col = m.Name, 26, p.Text
 		case online:
-			ui.Text(c, alias).Font(fontSerif).FontSize(22).SingleLine()
+			head, col = alias, p.Text
 		case loading:
-			ui.Text(c, "正在装载 "+modelName(a.switching)).Font(fontSerif).FontSize(22)
-		default:
-			ui.Text(c, "云端还没有模型在跑").Font(fontSerif).FontSize(22).TextColor(p.Text2)
+			head, col = "正在装载 "+modelName(a.switching), p.Text
 		}
+		h := ui.Text(c.Key("headline"), head).Font(fontSerif).FontSize(size).SingleLine().ContentTransition(morph)
+		h.TextColor(h.AnimateColor("c", col, fadeColor))
 		if alias != "" {
-			ui.Text(c, alias).Font(fontMono).FontSize(12).TextColor(p.Text3).SingleLine()
+			ui.Text(c.Key("alias"), alias).Font(fontMono).FontSize(12).TextColor(p.Text3).SingleLine().
+				ContentTransition(morph).Transition(rowMotion)
 		}
 		if m != nil {
-			ui.Row(c).Wrap().Gap(6).Children(func() {
+			ui.Row(c.Key("chips-"+m.ID)).Wrap().Gap(6).Transition(rowMotion).Children(func() {
 				for _, tag := range m.Tags {
 					chip(c, p, tag)
 				}
@@ -169,18 +166,23 @@ func (a *App) modelCard(c *ui.Context, p Palette) ui.Element {
 			})
 		}
 		if loading && st != nil {
-			ui.Column(c).Gap(6).Children(func() {
-				ui.Progress(c, clamp01(st.TaskProgress)).TextColor(p.Accent).Background(p.Hover).Label("装载进度")
-				ui.Text(c, st.TaskMessage).FontSize(12).TextColor(p.Text3).SingleLine()
+			ui.Column(c.Key("load")).Gap(6).Transition(rowMotion).Children(func() {
+				prog := clamp01(st.TaskProgress)
+				if prog <= 0 {
+					prog = -1 // nothing to measure yet: sweep instead of sitting at zero
+				}
+				gauge(c, p, "load", prog, p.Accent, "装载进度")
+				ui.Text(c, st.TaskMessage).FontSize(12).TextColor(p.Text3).SingleLine().ContentTransition(numeric)
 			})
 		}
 		if st != nil && a.connected && st.VRAMTotal > 0 {
-			ui.Column(c).Gap(6).Children(func() {
+			ui.Column(c.Key("vram")).Gap(6).Transition(rowMotion).Children(func() {
 				ui.Row(c).Children(func() {
 					ui.Text(c, "显存").FontSize(12).TextColor(p.Text3).Grow(1)
-					ui.Text(c, fmt.Sprintf("%.1f / %.1f GB", st.VRAMUsed, st.VRAMTotal)).Font(fontMono).FontFeatures("tnum").FontSize(12)
+					ui.Text(c, fmt.Sprintf("%.1f / %.1f GB", st.VRAMUsed, st.VRAMTotal)).Font(fontMono).FontFeatures("tnum").FontSize(12).
+						ContentTransition(numeric)
 				})
-				ui.Progress(c, clamp01(st.VRAMUsed/st.VRAMTotal)).TextColor(p.ChartRAM).Background(p.Hover).Label("显存占用")
+				gauge(c, p, "vram", st.VRAMUsed/st.VRAMTotal, p.ChartRAM, "显存占用")
 			})
 		}
 		ui.Row(c).Wrap().GapX(32).GapY(12).Children(func() {
@@ -191,7 +193,7 @@ func (a *App) modelCard(c *ui.Context, p Palette) ui.Element {
 			} else if a.access.Llama.OK {
 				slots = fmt.Sprintf("%d / %d 忙", a.access.Llama.SlotsBusy, a.access.Llama.SlotsTotal)
 			}
-			metric(c, p, "推理槽位", slots, "", 16, p.Text)
+			metricRoll(c, p, "推理槽位", slots, "", 16, p.Text, numeric)
 			metric(c, p, "最近一次推理", last, "", 16, p.Text)
 			mcpText, mcpCol := a.mcpSummary(p)
 			metric(c, p, "小说 MCP", mcpText, "", 16, mcpCol)
@@ -245,7 +247,7 @@ func (a *App) mcpSummary(p Palette) (string, ui.Color) {
 }
 
 func chip(c *ui.Context, p Palette, text string) {
-	ui.Box(c).Padding(3, 10).Radius(999).Border(1, p.BorderStrong).Children(func() {
+	ui.Box(c.Key(text)).Padding(3, 10).Radius(999).Border(1, p.BorderStrong).Children(func() {
 		ui.Text(c, text).FontSize(12).TextColor(p.Text2).NoWrap()
 	})
 }
@@ -253,7 +255,7 @@ func chip(c *ui.Context, p Palette, text string) {
 // ─── Hardware ─────────────────────────────────────────────────────────────────
 
 func (a *App) hardwareCard(c *ui.Context, p Palette) {
-	card(c, p, "硬件", "近 2 分钟走势，每 2.5 秒一个点", nil, func() {
+	card(c, p, 3, "硬件", "近 2 分钟走势，每 2.5 秒一个点", nil, func() {
 		ui.Row(c).Wrap().Gap(14).AlignItems(ui.Stretch).Children(func() {
 			st := a.status
 			on := st != nil && a.connected
@@ -275,34 +277,61 @@ func (a *App) hardwareCard(c *ui.Context, p Palette) {
 }
 
 func (a *App) sparkTile(c *ui.Context, p Palette, label, value string, hist []float64, col ui.Color) {
-	ui.Column(c.Key(label)).Basis(240).Grow(1).Shrink(1).MinWidth(200).Padding(14, 16).Gap(10).Radius(12).
-		Background(p.Raised).Children(func() {
+	tile := ui.Column(c.Key(label)).Basis(240).Grow(1).Shrink(1).MinWidth(200).Padding(14, 16).Gap(10).Radius(12).
+		Background(p.Raised)
+	hoverLift(tile, p)
+	tile.Children(func() {
 		ui.Row(c).Children(func() {
 			ui.Text(c, label).FontSize(13).TextColor(p.Text2).Grow(1)
-			ui.Text(c, value).Font(fontMono).FontFeatures("tnum").FontSize(12).NoWrap()
+			ui.Text(c, value).Font(fontMono).FontFeatures("tnum").FontSize(12).NoWrap().ContentTransition(numeric)
 		})
 		samples := append([]float64(nil), hist...)
+		at := a.histAt
 		ui.Box(c).Height(64).FillWidth().Draw(func(pt *ui.Painter, r ui.Rect) {
 			pt.Line(r.X, r.Y+r.H, r.X+r.W, r.Y+r.H, 1, p.BorderStrong)
 			if len(samples) < 2 {
 				return
 			}
+			// Each new sample slides in from the right edge rather than the line jumping
+			// a step every 2.5 s, as a live chart scrolls; then a ring ripples from the
+			// newest point. Computed from the clock, repainted without running the view,
+			// and only for the first 900 ms after a sample: still in between.
+			k := float32(1)
+			if dt := pt.Now().Sub(at); dt >= 0 && dt < sparkSlide {
+				k = float32(dt) / float32(sparkSlide)
+				pt.AnimationFrame()
+			}
+			step := float32(1) / float32(histLen-1)
+			slide := (1 - easeStandard(min(1, k*1.3))) * step
 			xs := make([]float32, len(samples))
 			ys := make([]float32, len(samples))
 			for i, v := range samples {
-				xs[i] = float32(i) / float32(histLen-1)
+				xs[i] = 1 - float32(len(samples)-1-i)*step + slide
 				ys[i] = float32(clamp01(v))
 			}
-			// Right-align the window so the line grows in from the right.
-			shift := 1 - xs[len(xs)-1]
-			for i := range xs {
-				xs[i] += shift
+			pt.Clip(r, 0, func() {
+				pt.FillPathGradient(chart.Area(r, xs, nil, ys, chart.CurveMonotone), ui.LinearGradient{
+					From: col.Alpha(0.26), To: col.Alpha(0.02), Angle: 180,
+				})
+				pt.StrokePath(chart.Line(r, xs, ys, chart.CurveMonotone), 2, col)
+			})
+			last := len(samples) - 1
+			hx, hy := r.X+r.W*xs[last], r.Y+r.H*(1-ys[last])
+			if hx > r.X+r.W+1 {
+				return
 			}
-			pt.FillPath(chart.Area(r, xs, nil, ys, chart.CurveMonotone), col.Alpha(0.16))
-			pt.StrokePath(chart.Line(r, xs, ys, chart.CurveMonotone), 2, col)
+			if k < 1 && !pt.Preferences().ReduceMotion {
+				e := ui.EaseOut(k)
+				rr := 3 + 9*e
+				pt.Fill(ui.Rect{X: hx - rr, Y: hy - rr, W: 2 * rr, H: 2 * rr}, col.Alpha(0.35*(1-e)), rr)
+			}
+			pt.Fill(ui.Rect{X: hx - 3, Y: hy - 3, W: 6, H: 6}, col, 3)
 		})
 	})
 }
+
+// sparkSlide is how long a new sample takes to slide in and ripple.
+const sparkSlide = 900 * time.Millisecond
 
 // ─── Ways in ──────────────────────────────────────────────────────────────────
 
@@ -319,7 +348,7 @@ type action struct {
 }
 
 func (a *App) accessCard(c *ui.Context, p Palette) {
-	card(c, p, "接入", "对话在这些入口里进行；绿灯 = 从这台电脑实测可用", func() {
+	card(c, p, 4, "接入", "对话在这些入口里进行；绿灯 = 从这台电脑实测可用", func() {
 		ghostButton(c.Key("edit-urls"), p, "修改地址").OnClick(func() { a.page = "connection" })
 	}, func() {
 		ui.Row(c).Wrap().Gap(12).AlignItems(ui.Stretch).Children(func() {
@@ -405,8 +434,10 @@ func (a *App) waysIn() []wayIn {
 
 func (a *App) wayRow(c *ui.Context, p Palette, w wayIn) {
 	col := map[string]ui.Color{"ok": p.Success, "warn": p.Warning, "down": p.Danger, "idle": p.Muted}[w.state]
-	ui.Column(c.Key(w.title)).Basis(440).Grow(1).Shrink(1).MinWidth(320).Padding(14, 16).Gap(8).Radius(12).
-		Background(p.Raised).Children(func() {
+	row := ui.Column(c.Key(w.title)).Basis(440).Grow(1).Shrink(1).MinWidth(320).Padding(14, 16).Gap(8).Radius(12).
+		Background(p.Raised)
+	hoverLift(row, p)
+	row.Children(func() {
 		ui.Row(c).Gap(10).Children(func() {
 			dot(c, col, 8)
 			ui.Text(c, w.title).FontSize(14).FontWeight(650).NoWrap()
@@ -423,7 +454,7 @@ func (a *App) wayRow(c *ui.Context, p Palette, w wayIn) {
 				b.Padding(4, 12).FontSize(12).OnClick(act.run)
 			}
 		})
-		ui.Text(c, w.note).FontSize(12).TextColor(p.Text3)
+		ui.Text(c, w.note).FontSize(12).TextColor(p.Text3).ContentTransition(crossfade)
 	})
 }
 

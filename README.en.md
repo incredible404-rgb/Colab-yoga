@@ -38,6 +38,7 @@ runtime/python.exe -X utf8 tools/install.py
 ```
 
 - Visual snapshot self-check: `cd console && SNAP_DIR=<dir> go test -run Snapshots` outputs PNG snapshots across dark/light themes, window sizes, and UI states.
+- Motion lives in `console/motion.go`: movement rides springs (a second click mid-flight turns with its velocity), colors and opacity ease on short curves, and movement jumps to its place when the desktop asks for less motion. Pulses and shimmers run only during wake, release, model load and inference; an idle window draws no frames (guarded by `TestIdleWindowIsStill`). Mid-animation screenshots: `cd console && SNAP_DIR=<dir> go test -run MotionSnapshots`.
 - Icons: `cd console && go run ./cmd/makeicon` renders `resources/icon.png` and `tray.png` using MyGo's canvas API.
 - Changes under `server/` take effect on the next wake or via **Redeploy Server** on the **Connection & Account** page, which reuses the running VM without interrupting the model or MCP forwarding on `:8081`.
 

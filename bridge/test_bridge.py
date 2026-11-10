@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -347,6 +348,203 @@ class RunnerSelectionTests(unittest.TestCase):
         self.legacy_file.write_text("{}", encoding="utf-8")
         os.utime(self.legacy_file, (2000, 2000))
         self.assertEqual(self._call_resolve(), str(self.legacy_file))
+
+
+class AuthStatusTests(unittest.TestCase):
+    """auth_status runs in a fresh process every 40-80 s; its account calls must overlap."""
+
+    def setUp(self) -> None:
+        self._saved = {}
+        self.barrier = threading.Barrier(3, timeout=3)
+        self.fail_info = False
+
+        def patch(obj, name, val):
+            self._saved[(obj, name)] = getattr(obj, name)
+            setattr(obj, name, val)
+
+        def info():
+            self.barrier.wait()
+            if self.fail_info:
+                raise RuntimeError("ccu-info 401")
+            return types.SimpleNamespace(paid_compute_units_balance=12.345, consumption_rate_hourly=1.7,
+                                         assignments_count=1)
+
+        def sync():
+            self.barrier.wait()
+            return {"easycolab": types.SimpleNamespace(name="easycolab", endpoint="vm1")}, [self._assignment()]
+
+        def email():
+            self.barrier.wait()
+            return "me@example.com"
+
+        fake_state = types.SimpleNamespace(client=types.SimpleNamespace(get_consumption_user_info=info))
+        patch(cb, "state", fake_state)
+        patch(cb, "_has_valid_token", lambda: True)
+        patch(cb, "_safe_sync_sessions", sync)
+        patch(cb, "_get_account_email", email)
+
+    def tearDown(self) -> None:
+        for (obj, name), val in self._saved.items():
+            setattr(obj, name, val)
+
+    @staticmethod
+    def _assignment():
+        return types.SimpleNamespace(
+            endpoint="vm1", accelerator=types.SimpleNamespace(value="G4"),
+            variant=types.SimpleNamespace(name="GPU"), machine_shape=types.SimpleNamespace(name="HIGH_RAM"))
+
+    def _run(self) -> dict:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cb.cmd_auth_status()
+        return json.loads(out.getvalue())
+
+    def test_the_three_account_calls_are_in_flight_together(self) -> None:
+        # The barrier only opens when all three are waiting at once; run one after another
+        # they would time out and the status would come back as an error.
+        body = self._run()
+        self.assertEqual(body, {
+            "ok": True, "logged_in": True, "email": "me@example.com", "paid_balance": 12.35,
+            "burn_rate_hourly": 1.7, "active_assignments": 1,
+            "sessions": [{"name": "easycolab", "endpoint": "vm1", "accelerator": "G4", "variant": "GPU",
+                          "shape": "HIGH_RAM"}],
+        })
+
+    def test_failure_reports_error_with_email(self) -> None:
+        self.fail_info = True
+        body = self._run()
+        self.assertFalse(body["ok"])
+        self.assertTrue(body["logged_in"])
+        self.assertEqual(body["email"], "me@example.com")
+        self.assertIn("ccu-info 401", body["error"])
+
+    def test_not_logged_in_makes_no_account_calls(self) -> None:
+        cb._has_valid_token = lambda: False
+        self.assertEqual(self._run(), {"ok": True, "logged_in": False})
+
+
+class AccountEmailCredsReuseTests(unittest.TestCase):
+    def test_email_comes_from_the_creds_just_checked_without_reloading_the_token_file(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        token, profile = tmp / "token.json", tmp / "account_profile.json"
+        token.write_bytes(b"{}")
+        creds = types.SimpleNamespace(valid=True, expired=False, refresh_token="r" * 30, token="t")
+        profile.write_bytes(json.dumps({"fp": ("r" * 30)[-20:], "email": "cached@example.com"}).encode())
+        saved = (cb.TOKEN_CONFIG_PATH, cb.ACCOUNT_PROFILE_CACHE_PATH, cb._CHECKED_CREDS, cb.Credentials)
+        boom = types.SimpleNamespace(from_authorized_user_file=lambda *a: (_ for _ in ()).throw(AssertionError("reloaded")))
+        try:
+            cb.TOKEN_CONFIG_PATH, cb.ACCOUNT_PROFILE_CACHE_PATH = str(token), str(profile)
+            cb._CHECKED_CREDS, cb.Credentials = creds, boom
+            self.assertEqual(cb._get_account_email(), "cached@example.com")
+        finally:
+            cb.TOKEN_CONFIG_PATH, cb.ACCOUNT_PROFILE_CACHE_PATH, cb._CHECKED_CREDS, cb.Credentials = saved
+
+    def test_has_valid_token_remembers_what_it_validated(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        token = tmp / "token.json"
+        token.write_bytes(b"{}")
+        creds = types.SimpleNamespace(valid=True, expired=False, refresh_token="r")
+        fake_creds_cls = types.SimpleNamespace(from_authorized_user_file=lambda *a: creds)
+        saved = (cb.TOKEN_CONFIG_PATH, cb.Credentials, cb._CHECKED_CREDS)
+        try:
+            cb.TOKEN_CONFIG_PATH, cb.Credentials = str(token), fake_creds_cls
+            self.assertTrue(cb._has_valid_token())
+            self.assertIs(cb._CHECKED_CREDS, creds)
+            token.unlink()
+            self.assertFalse(cb._has_valid_token())
+            self.assertIsNone(cb._CHECKED_CREDS)
+        finally:
+            cb.TOKEN_CONFIG_PATH, cb.Credentials, cb._CHECKED_CREDS = saved
+
+
+class LazyImportTests(unittest.TestCase):
+    def test_lazy_stand_in_loads_on_first_use_and_forwards(self) -> None:
+        lazy = cb._Lazy("collections", "OrderedDict")
+        self.assertIsNone(lazy._real)
+        self.assertEqual(list(lazy(a=1)), ["a"])
+        self.assertIsNotNone(lazy._real)
+        self.assertTrue(callable(lazy.fromkeys))
+
+    def test_importing_the_bridge_leaves_runtime_and_contents_unloaded(self) -> None:
+        import subprocess
+
+        code = (
+            "import sys; sys.path[:0] = %r; import colab_yoga_bridge as cb; "
+            "bad = [m for m in ('colab_cli.runtime', 'colab_cli.contents', 'jupyter_kernel_client') if m in sys.modules]; "
+            "print(bad); assert cb.ColabRuntime is not None and cb.ContentsClient is not None"
+        ) % ([p for p in sys.path if p],)
+        done = subprocess.run([sys.executable, "-X", "utf8", "-c", code], capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.strip(), "[]")
+
+    def test_wake_and_keeper_still_get_the_real_classes(self) -> None:
+        self.assertEqual(cb._Lazy("colab_cli.runtime", "ColabRuntime")._load().__name__, "ColabRuntime")
+        self.assertEqual(cb._Lazy("colab_cli.contents", "ContentsClient")._load().__name__, "ContentsClient")
+
+
+class KeeperLoopTests(unittest.TestCase):
+    """24 hours of 30 s beats against fakes: it must reach its own limit and not grow."""
+
+    def setUp(self) -> None:
+        self._saved = {}
+        self.tmp = Path(tempfile.mkdtemp())
+        self.now = 1_000_000.0
+        self.beats = 0
+        self.mem = {}
+
+        def patch(obj, name, val):
+            self._saved[(obj, name)] = getattr(obj, name)
+            setattr(obj, name, val)
+
+        def sleep(sec):
+            self.now += sec
+
+        proxy = types.SimpleNamespace(token="t", url="u", expires_at=lambda: None)
+        assign = types.SimpleNamespace(endpoint="vm1", runtime_proxy_info=proxy)
+        sess = types.SimpleNamespace(name="easycolab", endpoint="vm1", token="", url="", token_expires_at=None)
+
+        def exec_on(s, code, timeout=40):
+            self.beats += 1
+            if self.beats in (300, 2800):
+                import gc
+                import tracemalloc
+
+                gc.collect()
+                self.mem[self.beats] = tracemalloc.get_traced_memory()[0]
+            payload = {"url": "https://x.gradio.live", "app_alive": True, "idle_remaining": 900,
+                       "idle_timeout": 30, "llm_online": True}
+            return [{"text": "EC_KEEPER:" + json.dumps(payload)}]
+
+        patch(cb, "keeper_state_path", lambda: str(self.tmp / "keeper.json"))
+        patch(cb, "_has_valid_token", lambda: True)
+        patch(cb, "_safe_sync_sessions", lambda with_status=False: ({"easycolab": sess}, [assign], True))
+        patch(cb, "_track_a_covers", lambda endpoint: False)
+        patch(cb, "_exec_on_session", exec_on)
+        patch(cb, "_tfe_keep_alive", lambda endpoint: None)
+        patch(cb, "state", types.SimpleNamespace(store=types.SimpleNamespace(add=lambda s: None)))
+        patch(cb.time, "time", lambda: self.now)
+        patch(cb.time, "sleep", sleep)
+
+    def tearDown(self) -> None:
+        for (obj, name), val in self._saved.items():
+            setattr(obj, name, val)
+
+    def test_runs_to_the_24h_cap_without_growing(self) -> None:
+        import tracemalloc
+
+        tracemalloc.start()
+        try:
+            cb.cmd_keeper()
+        finally:
+            tracemalloc.stop()
+        st = json.loads((self.tmp / "keeper.json").read_text(encoding="utf-8"))
+        self.assertEqual(st["exit_reason"], "max_hours")
+        self.assertEqual(st["beats"], self.beats)
+        self.assertGreaterEqual(self.beats, 2850)
+        self.assertLess(self.mem[2800] - self.mem[300], 64 * 1024)
+
+    def test_kernel_lookup_reuses_one_http_session(self) -> None:
+        self.assertIs(cb._http(), cb._http())
 
 
 if __name__ == "__main__":

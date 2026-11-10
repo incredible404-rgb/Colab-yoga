@@ -74,6 +74,16 @@ Status fields (the console's `Status` struct reads exactly these): `server_versi
 slots_total, slots_busy, n_ctx_per_slot, tokens_seen, last_active_age_s, mcp_bridge:
 {listening, owner, reachable, error, checked_age_s}}`.
 
+What `/api/status` costs: GPU/RAM/disk telemetry and the :8081 identity probe are cached for
+about 2 s and shared by concurrent polls (one computation, not one per request); the GPU is
+read through libnvidia-ml once it has agreed with `nvidia-smi`, and through `nvidia-smi`
+otherwise; the model alias is re-read from `/v1/models` every 10 s while `/health` keeps
+answering (load and unload always probe fresh); the app log is followed from a remembered
+offset until the "Kernel started" line shows up. The idle countdown, load progress and
+console lines are never cached. The MCP forwarder passes a half-close on and closes both
+sockets when both directions are done; a forwarder that is already running keeps its old code
+until it is restarted.
+
 ## Liveness
 
 - The keeper (`colab_yoga_bridge.py keeper`, detached pythonw) runs one short kernel

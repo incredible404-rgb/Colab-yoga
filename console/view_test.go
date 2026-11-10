@@ -170,6 +170,7 @@ func TestBindingShowsCodeInputAndCancels(t *testing.T) {
 	// The bridge step (auth_url) runs in the background; with it done, the code input shows.
 	a.binding = true
 	tt.Frame()
+	tt.Advance(time.Second) // the code panel springs open
 	if _, ok := tt.Find("授权码"); !ok {
 		t.Fatalf("no authorization code input; texts %q", tt.Texts())
 	}
@@ -307,6 +308,7 @@ func TestSnapshots(t *testing.T) {
 		}
 		tt := ui.NewTesterWith(a.view, s.w, s.h, ui.TesterOptions{Dark: a.themeName != "light"})
 		tt.Frame()
+		tt.Advance(2 * time.Second) // let the cards finish arriving
 		f, err := os.Create(filepath.Join(dir, s.name+".png"))
 		if err != nil {
 			t.Fatal(err)
@@ -316,6 +318,123 @@ func TestSnapshots(t *testing.T) {
 		}
 		f.Close()
 	}
+}
+
+// TestIdleWindowIsStill guards the console's cost at rest: once the page has arrived and
+// the charts have slid in their last sample, a connected but idle window asks for no
+// frames. Only a job in flight (here a wake) keeps the status light pulsing.
+func TestIdleWindowIsStill(t *testing.T) {
+	for _, page := range []string{"dashboard", "connection"} {
+		a := fakeApp(t)
+		a.page = page
+		tt := ui.NewTesterWith(a.view, 1440, 900, ui.TesterOptions{Dark: true})
+		if !tt.FramePending() {
+			t.Errorf("%s: the cards should be arriving on the first frames", page)
+		}
+		tt.Advance(3 * time.Second)
+		if tt.FramePending() {
+			t.Errorf("%s: an idle window keeps drawing frames", page)
+		}
+	}
+	a := fakeApp(t)
+	tt := ui.NewTesterWith(a.view, 1440, 900, ui.TesterOptions{Dark: true})
+	tt.Advance(3 * time.Second)
+	a.waking = true
+	tt.Frame()
+	tt.Advance(time.Second)
+	if !tt.FramePending() {
+		t.Error("the status light should pulse while waking")
+	}
+	a.waking = false
+	tt.Frame()
+	tt.Advance(time.Second)
+	if tt.FramePending() {
+		t.Error("the pulse must stop once the job is done")
+	}
+}
+
+// TestMotionKeepsControlsUsable: mid-flight (a page switch, the theme crossfading, the
+// log drawer opening) the controls are still found and clickable, and every animation
+// comes to rest.
+func TestMotionKeepsControlsUsable(t *testing.T) {
+	a := fakeApp(t)
+	tt := ui.NewTesterWith(a.view, 1440, 900, ui.TesterOptions{Dark: true})
+	tt.Advance(2 * time.Second)
+	if err := tt.Click("连接与账号"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Advance(80 * time.Millisecond)
+	if a.page != "connection" || !hasTextPart(tt, "云端实例") {
+		t.Fatalf("page did not switch: %q", a.page)
+	}
+	if err := tt.Click("浅色"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tt.Click("日志"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Advance(300 * time.Millisecond)
+	if !a.logsOpen || a.themeName != "light" {
+		t.Fatalf("logs %v theme %q", a.logsOpen, a.themeName)
+	}
+	if err := tt.Click("收起"); err != nil {
+		t.Fatalf("drawer controls must work while it opens: %v", err)
+	}
+	tt.Advance(3 * time.Second)
+	if a.logsOpen || tt.FramePending() {
+		t.Errorf("logs %v, frames still pending %v", a.logsOpen, tt.FramePending())
+	}
+}
+
+func TestPaletteBlendEnds(t *testing.T) {
+	if blendPalette(0) != darkPalette || blendPalette(1) != lightPalette {
+		t.Error("the blend must land exactly on each theme")
+	}
+	mid := blendPalette(0.5)
+	if mid.Bg == darkPalette.Bg || mid.Bg == lightPalette.Bg {
+		t.Error("halfway should be between the two")
+	}
+}
+
+// TestMotionSnapshots writes frames caught mid-animation, to review the motion by eye:
+// SNAP_DIR=... go test -run MotionSnapshots
+func TestMotionSnapshots(t *testing.T) {
+	dir := os.Getenv("SNAP_DIR")
+	if dir == "" {
+		t.Skip("set SNAP_DIR to write screenshots")
+	}
+	save := func(tt *ui.Tester, name string) {
+		f, _ := os.Create(filepath.Join(dir, name+".png"))
+		_ = png.Encode(f, tt.Image())
+		f.Close()
+	}
+	a := fakeApp(t)
+	tt := ui.NewTesterWith(a.view, 1440, 900, ui.TesterOptions{Dark: true})
+	tt.Advance(160 * time.Millisecond)
+	save(tt, "mid_arrive_160ms")
+	tt.Advance(3 * time.Second)
+	_ = tt.Click("连接与账号")
+	tt.Advance(90 * time.Millisecond)
+	save(tt, "mid_pageswitch_90ms")
+	tt.Advance(220 * time.Millisecond)
+	save(tt, "mid_pageswitch_310ms")
+	tt.Advance(2 * time.Second)
+	_ = tt.Click("浅色")
+	tt.Advance(170 * time.Millisecond)
+	save(tt, "mid_theme_170ms")
+	tt.Advance(2 * time.Second)
+	_ = tt.Click("日志")
+	tt.Advance(150 * time.Millisecond)
+	save(tt, "mid_drawer_150ms")
+	tt.Advance(2 * time.Second)
+	save(tt, "mid_drawer_done")
+
+	b := fakeApp(t)
+	b.switching = "qwen38-huihui-v2"
+	b.status.IsDownloading, b.status.TaskProgress, b.status.TaskMessage = true, 0, "正在准备下载…"
+	tt2 := ui.NewTesterWith(b.view, 1440, 900, ui.TesterOptions{Dark: true})
+	tt2.Advance(1200 * time.Millisecond)
+	save(tt2, "mid_loading_sweep")
 }
 
 func hasTextPart(tt *ui.Tester, part string) bool {

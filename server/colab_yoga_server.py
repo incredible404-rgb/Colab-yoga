@@ -5,6 +5,7 @@ console needs: an HTTP API (see docs/architecture.md), live telemetry, the colab
 runner boot, an idle watchdog that releases the runtime, and the detached MCP forwarder.
 Conversations never pass through here; web, Magpie and MCP reach llama-server directly.
 """
+import ctypes
 import inspect
 import json
 import os
@@ -20,9 +21,10 @@ import time
 import urllib.request
 from collections import deque
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 SERVER_VERSION = "1.0.0"
@@ -50,6 +52,47 @@ KERNEL_ALIAS_TO_ID = {
     "GLM-5.3-Flash-Uncensored-GSQ-RCO-Q4": "glm53-flash",
 }
 KERNEL_LLM_IDS = tuple(KERNEL_ALIAS_TO_ID.values())
+
+
+# ==============================================================================
+# Short-TTL single-flight cache for the /api/status hot path
+# ==============================================================================
+def _mono() -> float:
+    """Monotonic clock for cache ages (tests replace this)."""
+    return time.monotonic()
+
+
+class _TTLCell:
+    """One value that is recomputed at most once per `ttl` seconds, however many threads ask.
+
+    Concurrent callers of an expired cell wait for the single computation that is already
+    running instead of starting their own (single-flight); `force=True` still shares a
+    computation that started after the caller arrived. An exception from `compute` is not
+    cached and reaches the caller that ran it."""
+
+    def __init__(self, ttl: float):
+        self.ttl = ttl
+        self._lock = threading.Lock()
+        self._started = 0  # computations begun so far; orders force requests against runs
+        self._entry: Optional[Tuple[float, int, Any]] = None  # (clock at start, run number, value)
+
+    def get(self, compute: Callable[[], Any], force: bool = False) -> Any:
+        seen = self._started
+        entry = self._entry
+        if entry is not None and not force and _mono() - entry[0] < self.ttl:
+            return entry[2]
+        with self._lock:
+            entry = self._entry
+            if entry is not None and (entry[1] > seen if force else _mono() - entry[0] < self.ttl):
+                return entry[2]
+            self._started += 1
+            started = _mono()
+            value = compute()
+            self._entry = (started, self._started, value)
+            return value
+
+    def invalidate(self) -> None:
+        self._entry = None
 
 
 # ==============================================================================
@@ -122,17 +165,53 @@ def _runtime_assigned_ts(app_log: str = APP_LOG) -> Optional[float]:
     global _RUNTIME_ASSIGNED_TS
     if _RUNTIME_ASSIGNED_TS is not None:
         return _RUNTIME_ASSIGNED_TS
-    try:
-        with open(app_log, "r", encoding="utf-8", errors="replace") as f:
-            for line in f:
-                if "Kernel started" not in line:
-                    continue
+    with _UPTIME_LOCK:
+        if _RUNTIME_ASSIGNED_TS is not None:
+            return _RUNTIME_ASSIGNED_TS
+        scan = _UPTIME_SCAN
+        if scan["path"] != app_log:
+            scan.update(path=app_log, offset=0, next_try=0.0)
+        now = _mono()
+        if now < scan["next_try"]:
+            return None
+        try:
+            ts = _scan_app_log_for_kernel_start(app_log, scan)
+        except OSError:
+            ts = None
+        if ts is not None:
+            _RUNTIME_ASSIGNED_TS = ts
+            return ts
+        scan["next_try"] = now + _UPTIME_RETRY_S
+    return None
+
+
+# The line only appears once, early, so before it shows up the log is followed from where
+# the previous look stopped instead of being read again from the top on every status call.
+_UPTIME_LOCK = threading.Lock()
+_UPTIME_SCAN: Dict[str, Any] = {"path": None, "offset": 0, "next_try": 0.0}
+_UPTIME_RETRY_S = 1.0
+
+
+def _scan_app_log_for_kernel_start(app_log: str, scan: Dict[str, Any]) -> Optional[float]:
+    size = os.stat(app_log).st_size
+    if size == scan["offset"]:
+        return None  # nothing new since the last look: no need to open it
+    if size < scan["offset"]:
+        scan["offset"] = 0  # truncated or replaced
+    with open(app_log, "rb") as f:
+        f.seek(scan["offset"])
+        for line in f:
+            if not line.endswith(b"\n"):
+                break  # still being written: look again from here next time
+            scan["offset"] += len(line)
+            if b"Kernel started" not in line:
+                continue
+            try:
                 stamp = str(json.loads(line).get("time") or "")
                 if stamp:
-                    _RUNTIME_ASSIGNED_TS = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
-                    return _RUNTIME_ASSIGNED_TS
-    except Exception:
-        pass
+                    return datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+            except Exception:
+                continue
     return None
 
 
@@ -171,8 +250,7 @@ _GB = 1024 ** 3
 NO_GPU_NAME = "CPU Mode (未检测到 GPU)"
 NO_GPU_CU_RATE = 0.10
 _TELEMETRY_TTL = 2.0
-_TELEMETRY_LOCK = threading.Lock()
-_TELEMETRY_CACHE: Tuple[float, Dict[str, Any]] = (0.0, {})
+_HARDWARE_CELL = _TTLCell(_TELEMETRY_TTL)
 
 
 def _query_nvidia_smi() -> Optional[Tuple[str, float, float]]:
@@ -186,6 +264,104 @@ def _query_nvidia_smi() -> Optional[Tuple[str, float, float]]:
         return name, float(used_mib) / 1024.0, float(total_mib) / 1024.0
     except Exception:
         return None
+
+
+class _NvmlMemoryV2(ctypes.Structure):
+    _fields_ = [("version", ctypes.c_uint), ("total", ctypes.c_ulonglong), ("reserved", ctypes.c_ulonglong),
+                ("free", ctypes.c_ulonglong), ("used", ctypes.c_ulonglong)]
+
+
+def _load_nvml():
+    for lib_name in ("libnvidia-ml.so.1", "libnvidia-ml.so", "nvml.dll"):
+        try:
+            return ctypes.CDLL(lib_name)
+        except OSError:
+            continue
+    raise OSError("libnvidia-ml not found")
+
+
+class _NvmlReader:
+    """GPU name and memory from libnvidia-ml, the library nvidia-smi itself reads, so a
+    status poll does not fork a process every few seconds. It checks itself against
+    nvidia-smi once (same name and total, used within 0.25 GB); any mismatch or missing
+    symbol turns it off for good and nvidia-smi keeps being used. A runtime error backs
+    off to nvidia-smi for a minute, then the library is opened again."""
+
+    RETRY_S = 60.0
+    TOLERANCE_GB = 0.25
+
+    def __init__(self, loader: Callable[[], Any] = _load_nvml):
+        self._loader = loader
+        self._lock = threading.Lock()
+        self._lib: Any = None
+        self._handle: Any = None
+        self._name = ""
+        self._off = False
+        self._retry_at = 0.0
+
+    def query(self) -> Optional[Tuple[str, float, float]]:
+        """(name, used GB, total GB) or None when the caller must use nvidia-smi."""
+        if self._off or _mono() < self._retry_at:
+            return None
+        with self._lock:
+            if self._off:
+                return None
+            try:
+                if self._lib is None:
+                    self._open()
+                return self._read()
+            except Exception:
+                self._lib = None
+                if not self._off:
+                    self._retry_at = _mono() + self.RETRY_S
+                return None
+
+    def _open(self) -> None:
+        try:
+            lib = self._loader()
+            mem_fn = lib.nvmlDeviceGetMemoryInfo_v2
+            mem_fn.argtypes = [ctypes.c_void_p, ctypes.POINTER(_NvmlMemoryV2)]
+            lib.nvmlInit_v2.restype = ctypes.c_int
+            lib.nvmlDeviceGetHandleByIndex_v2.argtypes = [ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p)]
+            lib.nvmlDeviceGetName.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint]
+        except (OSError, AttributeError):
+            self._off = True  # no library or too old a driver: nothing to retry
+            raise
+        if lib.nvmlInit_v2() != 0:
+            raise OSError("nvmlInit failed")
+        handle = ctypes.c_void_p()
+        if lib.nvmlDeviceGetHandleByIndex_v2(0, ctypes.byref(handle)) != 0:
+            raise OSError("no GPU at index 0")
+        buf = ctypes.create_string_buffer(96)
+        if lib.nvmlDeviceGetName(handle, buf, 96) != 0:
+            raise OSError("nvmlDeviceGetName failed")
+        self._lib, self._handle, self._name = lib, handle, buf.value.decode("utf-8", errors="replace").strip()
+        mine = self._read()
+        for attempt in range(3):  # memory may move between the two reads while a model loads
+            ref = _query_nvidia_smi()
+            if ref is None:
+                return  # nothing to compare with; the library answered
+            if (ref[0] == self._name and abs(ref[2] - mine[2]) < 0.01
+                    and abs(ref[1] - mine[1]) <= self.TOLERANCE_GB):
+                return
+            mine = self._read()
+        self._off = True
+        self._lib = None
+        raise OSError("nvml disagrees with nvidia-smi")
+
+    def _read(self) -> Tuple[str, float, float]:
+        mem = _NvmlMemoryV2()
+        mem.version = ctypes.sizeof(_NvmlMemoryV2) | (2 << 24)
+        if self._lib.nvmlDeviceGetMemoryInfo_v2(self._handle, ctypes.byref(mem)) != 0:
+            raise OSError("nvmlDeviceGetMemoryInfo failed")
+        return self._name, mem.used / _GB, mem.total / _GB
+
+
+_NVML = _NvmlReader()
+
+
+def _read_gpu() -> Optional[Tuple[str, float, float]]:
+    return _NVML.query() or _query_nvidia_smi()
 
 
 def _read_ram_gb() -> Tuple[float, float]:
@@ -212,14 +388,8 @@ def _read_disk_gb() -> Tuple[float, float]:
         return 0.0, 0.0
 
 
-def get_hardware_snapshot() -> Dict[str, Any]:
-    global _TELEMETRY_CACHE
-    now = time.time()
-    with _TELEMETRY_LOCK:
-        stamp, cached = _TELEMETRY_CACHE
-        if cached and now - stamp < _TELEMETRY_TTL:
-            return dict(cached)
-    gpu = _query_nvidia_smi()
+def _build_hardware_snapshot() -> Dict[str, Any]:
+    gpu = _read_gpu()
     if gpu is None:
         gpu_name, vram_used, vram_total, cu_rate = NO_GPU_NAME, 0.0, 0.0, NO_GPU_CU_RATE
     else:
@@ -227,7 +397,7 @@ def get_hardware_snapshot() -> Dict[str, Any]:
         cu_rate = estimate_cu_burn_rate(gpu_name)
     ram_total, ram_used = _read_ram_gb()
     disk_total, disk_used = _read_disk_gb()
-    snap = {
+    return {
         "gpu_name": gpu_name,
         "vram_used_gb": vram_used,
         "vram_total_gb": vram_total,
@@ -237,28 +407,32 @@ def get_hardware_snapshot() -> Dict[str, Any]:
         "disk_used_gb": disk_used,
         "disk_total_gb": disk_total,
     }
-    with _TELEMETRY_LOCK:
-        _TELEMETRY_CACHE = (now, snap)
-    return dict(snap)
+
+
+def get_hardware_snapshot() -> Dict[str, Any]:
+    """Telemetry at most ~2 s old; concurrent callers share one computation."""
+    return dict(_HARDWARE_CELL.get(_build_hardware_snapshot))
 
 
 # ==============================================================================
 # Idle clock, Jupyter heartbeat, runtime release
 # ==============================================================================
 _LAST_JUPYTER_HEARTBEAT_TS = 0.0
+_HEARTBEAT_LOCK = threading.Lock()
 
 
 def _ping_local_colab_jupyter(force: bool = False) -> None:
     """Touch the VM's own Jupyter server (127.0.0.1:8080) now and then. All real traffic
     runs over Tailscale and the tunnel, so without this Colab can see a quiet container."""
     global _LAST_JUPYTER_HEARTBEAT_TS
-    now = time.time()
-    if not force and (now - _LAST_JUPYTER_HEARTBEAT_TS) < 40.0:
-        return
-    _LAST_JUPYTER_HEARTBEAT_TS = now
+    with _HEARTBEAT_LOCK:  # watchdog and request threads race here; one ping thread per interval
+        now = time.time()
+        if not force and (now - _LAST_JUPYTER_HEARTBEAT_TS) < 40.0:
+            return
+        _LAST_JUPYTER_HEARTBEAT_TS = now
 
     def _do_ping():
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        opener = _local_opener()
         for ep in ("http://127.0.0.1:8080/api/kernels", "http://127.0.0.1:8080/api/status"):
             try:
                 req = urllib.request.Request(ep, headers={"X-Colab-Client-Agent": "colab-cli"})
@@ -297,9 +471,8 @@ def _unassign_runtime() -> None:
     addr = os.environ.get("TBE_RUNTIME_ADDR")
     if not addr:
         raise RuntimeError("找不到 Colab 运行时管理服务 (TBE_RUNTIME_ADDR)")
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     req = urllib.request.Request(f"http://{addr}/unassign", data=b"", method="POST")
-    with opener.open(req, timeout=10) as resp:
+    with _local_opener().open(req, timeout=10) as resp:
         if resp.status != 200:
             raise RuntimeError(f"unassign HTTP {resp.status}")
 
@@ -315,27 +488,51 @@ def disconnect_colab_runtime() -> Tuple[bool, str]:
 # ==============================================================================
 # llama-server :8081 (started by the colab_kernel runner, outside this process)
 # ==============================================================================
+_LOCAL_OPENER: Optional[urllib.request.OpenerDirector] = None
+
+
 def _local_opener() -> urllib.request.OpenerDirector:
-    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    """One shared no-proxy opener for loopback calls; open() keeps no per-call state, so
+    threads can share it and nobody rebuilds the handler chain on every status poll."""
+    global _LOCAL_OPENER
+    if _LOCAL_OPENER is None:
+        _LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return _LOCAL_OPENER
+
+
+_ALIAS_MEMO: Tuple[float, str] = (0.0, "")  # (when /v1/models last answered, alias)
+_ALIAS_RECHECK_S = 10.0
 
 
 def _probe_kernel_llama_8081() -> Optional[Dict[str, Any]]:
-    """Is the colab_kernel llama-server up on :8081, and which model does it serve?"""
+    """Is the colab_kernel llama-server up on :8081, and which model does it serve?
+
+    /health is asked every time; the alias from /v1/models is re-read only every
+    _ALIAS_RECHECK_S while /health keeps answering. Swapping models goes through a stop and
+    a start, which /health sees, and load/unload in this server forget the memo."""
+    global _ALIAS_MEMO
     opener = _local_opener()
     try:
         with opener.open("http://127.0.0.1:8081/health", timeout=1.2) as h_resp:
             if h_resp.status != 200:
+                _ALIAS_MEMO = (0.0, "")
                 return None
     except Exception:
+        _ALIAS_MEMO = (0.0, "")
         return None
-    alias = next(iter(KERNEL_ALIAS_TO_ID))
-    try:
-        with opener.open("http://127.0.0.1:8081/v1/models", timeout=1.5) as m_resp:
-            data = json.loads(m_resp.read().decode("utf-8", errors="replace")).get("data") or []
-            if data and data[0].get("id"):
-                alias = str(data[0]["id"])
-    except Exception:
-        pass
+    memo_at, memo_alias = _ALIAS_MEMO
+    if memo_alias and _mono() - memo_at < _ALIAS_RECHECK_S:
+        alias = memo_alias
+    else:
+        alias = next(iter(KERNEL_ALIAS_TO_ID))
+        try:
+            with opener.open("http://127.0.0.1:8081/v1/models", timeout=1.5) as m_resp:
+                data = json.loads(m_resp.read().decode("utf-8", errors="replace")).get("data") or []
+                if data and data[0].get("id"):
+                    alias = str(data[0]["id"])
+                    _ALIAS_MEMO = (_mono(), alias)
+        except Exception:
+            pass
     return {
         "model_id": KERNEL_ALIAS_TO_ID.get(alias, KERNEL_LLM_IDS[0]),
         "served_alias": alias,
@@ -416,17 +613,38 @@ def _sample_llama_8081_slots() -> bool:
 
 
 LOADED_MODEL_IDS: List[str] = []  # at most one: whatever :8081 serves, as of the last probe
+_PROBE_CELL = _TTLCell(2.0)
 
 
-def _sync_kernel_8081_to_loaded_runtimes() -> Optional[Dict[str, Any]]:
+def _apply_kernel_8081_probe() -> Optional[Dict[str, Any]]:
     k8081 = _probe_kernel_llama_8081()
-    LOADED_MODEL_IDS.clear()
     if k8081 is None:
+        LOADED_MODEL_IDS[:] = []
         LLM_8081_STATE.update(online=False, alias="", model_id="")
         return None
     LLM_8081_STATE.update(online=True, alias=k8081["served_alias"], model_id=k8081["model_id"])
-    LOADED_MODEL_IDS.append(k8081["model_id"])
+    LOADED_MODEL_IDS[:] = [k8081["model_id"]]  # one assignment: a status reader never sees it half-built
     return k8081
+
+
+def _sync_kernel_8081_to_loaded_runtimes() -> Optional[Dict[str, Any]]:
+    """Probe :8081 now (load and unload decide on this) and refresh what status shows."""
+    global _ALIAS_MEMO
+    _ALIAS_MEMO = (0.0, "")
+    return _PROBE_CELL.get(_apply_kernel_8081_probe, force=True)
+
+
+def _sync_kernel_8081_if_stale() -> Optional[Dict[str, Any]]:
+    """What /api/status uses: the probe result at most ~2 s old, shared by concurrent polls."""
+    return _PROBE_CELL.get(_apply_kernel_8081_probe)
+
+
+def reset_status_caches() -> None:
+    """Forget every cached status input (tests; also safe at runtime)."""
+    global _ALIAS_MEMO
+    _ALIAS_MEMO = (0.0, "")
+    _PROBE_CELL.invalidate()
+    _HARDWARE_CELL.invalidate()
 
 
 def get_llm_8081_status() -> Dict[str, Any]:
@@ -464,6 +682,9 @@ import socket
 import struct
 import sys
 import threading
+import time
+
+BUF = 65536
 
 
 def recv_exact(sock, n):
@@ -474,6 +695,20 @@ def recv_exact(sock, n):
             raise OSError("connection closed during SOCKS handshake")
         buf += chunk
     return buf
+
+
+def tune(sock):
+    """Small JSON-RPC messages must not wait on Nagle + delayed ACK; keepalive lets a vanished
+    peer (the PC going offline) end the connection instead of holding its threads forever."""
+    try:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        for name, val in (("TCP_KEEPIDLE", 60), ("TCP_KEEPINTVL", 15), ("TCP_KEEPCNT", 4)):
+            opt = getattr(socket, name, None)
+            if opt is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, opt, val)
+    except OSError:
+        pass
 
 
 def socks5_connect(ip, port, socks_port, timeout=10.0):
@@ -490,24 +725,60 @@ def socks5_connect(ip, port, socks_port, timeout=10.0):
         up.close()
         raise
     up.settimeout(None)
+    tune(up)
     return up
 
 
-def pipe(a, b):
+def close_quietly(sock):
+    # shutdown first: on Linux close() alone does not wake a thread blocked in recv on it.
     try:
-        while True:
-            data = a.recv(65536)
-            if not data:
-                break
-            b.sendall(data)
+        sock.shutdown(socket.SHUT_RDWR)
     except Exception:
         pass
-    finally:
-        for s in (a, b):
-            try:
-                s.close()
-            except Exception:
-                pass
+    try:
+        sock.close()
+    except Exception:
+        pass
+
+
+class Link:
+    """Two sockets and their two directions. A clean end of one direction is passed on as a
+    half-close so the other side can still finish its answer; the sockets are closed when
+    both directions are done, or at once when either fails."""
+
+    def __init__(self, cli, up):
+        self.cli, self.up = cli, up
+        self.open_directions = 2
+        self.lock = threading.Lock()
+
+    def pipe(self, a, b):
+        buf = bytearray(BUF)
+        view = memoryview(buf)
+        try:
+            while True:
+                n = a.recv_into(buf)
+                if not n:
+                    break
+                b.sendall(view[:n])
+        except Exception:
+            close_quietly(self.cli)
+            close_quietly(self.up)
+            return
+        try:
+            b.shutdown(socket.SHUT_WR)
+        except Exception:
+            pass
+        with self.lock:
+            self.open_directions -= 1
+            finished = self.open_directions == 0
+        if finished:
+            close_quietly(self.cli)
+            close_quietly(self.up)
+
+
+def pipe(a, b):
+    """One direction of an unpaired pair (kept for callers that wire sockets themselves)."""
+    Link(a, b).pipe(a, b)
 
 
 def handle(cli, ip, port, socks_port):
@@ -515,19 +786,25 @@ def handle(cli, ip, port, socks_port):
         up = socks5_connect(ip, port, socks_port)
     except Exception as e:
         print("connect failed:", e, flush=True)
-        try:
-            cli.close()
-        except Exception:
-            pass
+        close_quietly(cli)
         return
-    threading.Thread(target=pipe, args=(cli, up), daemon=True).start()
-    threading.Thread(target=pipe, args=(up, cli), daemon=True).start()
+    tune(cli)
+    link = Link(cli, up)
+    # This thread carries one direction itself: two threads per connection, not three.
+    threading.Thread(target=link.pipe, args=(up, cli), name="mcp-pipe", daemon=True).start()
+    link.pipe(cli, up)
 
 
 def serve(srv, ip, port, socks_port):
     while True:
-        cli, _ = srv.accept()
-        threading.Thread(target=handle, args=(cli, ip, port, socks_port), daemon=True).start()
+        try:
+            cli, _ = srv.accept()
+        except OSError:
+            if srv.fileno() == -1:
+                return  # listener closed
+            time.sleep(0.1)  # e.g. out of file descriptors: keep serving once there is room
+            continue
+        threading.Thread(target=handle, args=(cli, ip, port, socks_port), name="mcp-conn", daemon=True).start()
 
 
 if __name__ == "__main__":
@@ -535,14 +812,33 @@ if __name__ == "__main__":
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("127.0.0.1", port))
-    srv.listen(32)
+    srv.listen(128)
     print("listening on 127.0.0.1:%d" % port, flush=True)
     serve(srv, ip, port, socks_port)
 '''
 
 
+_MCP_TARGET_MEMO: Dict[str, Any] = {"sig": None, "target": None}
+
+
 def _kernel_mcp_target() -> Optional[Tuple[str, int, int]]:
-    """(pc_tailscale_ip, mcp_port, socks_port) as written into the colab_kernel boot scripts."""
+    """(pc_tailscale_ip, mcp_port, socks_port) as written into the colab_kernel boot scripts.
+
+    The runners file holds every model's boot script, and the watchdog asks every tick, so
+    the parsed answer is kept until the file's mtime or size changes."""
+    try:
+        st = os.stat(RUNNERS_FILE)
+    except OSError:
+        return None
+    sig = (RUNNERS_FILE, st.st_mtime_ns, st.st_size)
+    if _MCP_TARGET_MEMO["sig"] == sig:
+        return _MCP_TARGET_MEMO["target"]
+    target = _parse_mcp_target()
+    _MCP_TARGET_MEMO.update(sig=sig, target=target)
+    return target
+
+
+def _parse_mcp_target() -> Optional[Tuple[str, int, int]]:
     try:
         with open(RUNNERS_FILE, "r", encoding="utf-8") as rf:
             runners = json.load(rf)
@@ -579,13 +875,14 @@ def _ensure_mcp_bridge() -> None:
     try:
         with open(MCP_BRIDGE_PATH, "w", encoding="utf-8", newline="\n") as f:
             f.write(MCP_BRIDGE_SCRIPT)
-        subprocess.Popen(
-            [sys.executable, "-u", MCP_BRIDGE_PATH, ip, str(port), str(socks_port)],
-            stdout=open(MCP_BRIDGE_LOG, "a", newline="\n"),
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        with open(MCP_BRIDGE_LOG, "a", newline="\n") as log:  # the child keeps its own copy of the handle
+            subprocess.Popen(
+                [sys.executable, "-u", MCP_BRIDGE_PATH, ip, str(port), str(socks_port)],
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
     except Exception as e:
         MCP_BRIDGE_STATE.update(listening=False, error=str(e)[:160])
         return
@@ -852,7 +1149,7 @@ class IdleConfigRequest(BaseModel):
 
 
 def get_status() -> Dict[str, Any]:
-    _sync_kernel_8081_to_loaded_runtimes()
+    _sync_kernel_8081_if_stale()
     hw = get_hardware_snapshot()
     uptime = _runtime_uptime_seconds()
     return {
@@ -885,7 +1182,8 @@ def create_app() -> FastAPI:
 
     @app.get("/api/status")
     def api_status():
-        return get_status()
+        # A ready dict straight into JSONResponse skips FastAPI's per-field re-encoding.
+        return JSONResponse(get_status())
 
     @app.post("/api/load_model")
     def api_load_model(req: LoadModelRequest):

@@ -34,6 +34,36 @@ def log_tail(chars=600):
         return "no log"
 
 
+def wait_for_url(proc, wait_seconds=WAIT_SECONDS, poll_s=0.5):
+    """Print WAKE_URL:<url> once the server logs it, or WAKE_ERROR: if it exits or times out.
+
+    Follows the log from where the last look ended (it is rewritten from empty at launch)
+    instead of re-reading it whole, and looks every poll_s so the URL is reported as soon
+    as the line lands. Requiring whitespace after the URL keeps a half-written one from matching."""
+    url_re = re.compile(r"COLAB_YOGA_URL=(https://\S+)\s")
+    deadline = time.time() + wait_seconds
+    pos, seen = 0, ""
+    while time.time() < deadline:
+        time.sleep(poll_s)
+        try:
+            with open(LOG, "rb") as f:
+                f.seek(pos)
+                chunk = f.read()
+        except OSError:
+            chunk = b""
+        if chunk:
+            pos += len(chunk)
+            seen = seen[-300:] + chunk.decode("utf-8", errors="replace")
+            m = url_re.search(seen)
+            if m:
+                print("WAKE_URL:" + m.group(1), flush=True)
+                return
+        if proc.poll() is not None:
+            print("WAKE_ERROR: 服务进程已退出 (exit=%s)，日志尾部: %s" % (proc.returncode, log_tail()), flush=True)
+            return
+    print("WAKE_ERROR: 启动超时，日志尾部: " + log_tail(), flush=True)
+
+
 def main():
     missing = [pkg for mod, pkg in DEPENDENCIES.items() if importlib.util.find_spec(mod) is None]
     if missing:
@@ -67,23 +97,7 @@ def main():
         proc = subprocess.Popen([sys.executable, "-u", SERVER], cwd="/content", env=env,
                                 stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                 start_new_session=True)
-
-    url_re = re.compile(r"COLAB_YOGA_URL=(https://\S+)")
-    deadline = time.time() + WAIT_SECONDS
-    while time.time() < deadline:
-        time.sleep(2)
-        try:
-            with open(LOG, "r", encoding="utf-8", errors="replace") as f:
-                m = url_re.search(f.read())
-        except OSError:
-            m = None
-        if m:
-            print("WAKE_URL:" + m.group(1), flush=True)
-            return
-        if proc.poll() is not None:
-            print("WAKE_ERROR: 服务进程已退出 (exit=%s)，日志尾部: %s" % (proc.returncode, log_tail()), flush=True)
-            return
-    print("WAKE_ERROR: 启动超时，日志尾部: " + log_tail(), flush=True)
+    wait_for_url(proc)
 
 
 main()

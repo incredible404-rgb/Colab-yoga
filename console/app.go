@@ -91,6 +91,7 @@ type App struct {
 	access            Access
 	keeper            Keeper
 	hist              [3][]float64
+	histAt            time.Time // when the last samples came, for the charts to slide them in
 	logs              []string
 	serverLog         []string
 	logsOpen          bool
@@ -286,6 +287,7 @@ func (a *App) applyStatus(st *Status) {
 		if total <= 0 {
 			return
 		}
+		a.histAt = a.now()
 		a.hist[i] = append(a.hist[i], used/total)
 		if len(a.hist[i]) > histLen {
 			a.hist[i] = a.hist[i][len(a.hist[i])-histLen:]

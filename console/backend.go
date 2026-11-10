@@ -397,6 +397,8 @@ func probeLlama(base string) LlamaProbe {
 		return p
 	}
 	p.OK = true
+	// The model and the slots are independent round trips over the tailnet: ask both at
+	// once, so a probe costs one round trip after /health rather than two.
 	var models struct {
 		Data []struct {
 			ID   string `json:"id"`
@@ -405,14 +407,22 @@ func probeLlama(base string) LlamaProbe {
 			} `json:"meta"`
 		} `json:"data"`
 	}
-	if getJSON(base+"/v1/models", &models) == nil && len(models.Data) > 0 {
+	var slots []struct {
+		Busy bool `json:"is_processing"`
+	}
+	var wg sync.WaitGroup
+	var modelsErr, slotsErr error
+	wg.Add(2)
+	go func() { defer wg.Done(); modelsErr = getJSON(base+"/v1/models", &models) }()
+	go func() { defer wg.Done(); slotsErr = getJSON(base+"/slots", &slots) }()
+	wg.Wait()
+	if modelsErr == nil && len(models.Data) > 0 {
 		p.Alias, p.NCtx = models.Data[0].ID, models.Data[0].Meta.NCtx
 	}
-	var slots []map[string]any
-	if getJSON(base+"/slots", &slots) == nil {
+	if slotsErr == nil {
 		p.SlotsTotal = len(slots)
 		for _, s := range slots {
-			if b, _ := s["is_processing"].(bool); b {
+			if s.Busy {
 				p.SlotsBusy++
 			}
 		}
@@ -441,7 +451,7 @@ func shortErr(err error) string {
 func findMagpie(tsURL string) MagpieProbe {
 	var out MagpieProbe
 	home, _ := os.UserHomeDir()
-	b, err := os.ReadFile(filepath.Join(home, ".config", "magpie", "providers.json"))
+	b, err := magpieProviders.read(filepath.Join(home, ".config", "magpie", "providers.json"))
 	if err != nil || tsURL == "" {
 		return out
 	}
@@ -470,6 +480,35 @@ func findMagpie(tsURL string) MagpieProbe {
 		}
 	}
 	return out
+}
+
+// statCache keeps a file's bytes until its size or modification time changes, so a
+// probe every 10 s stats the file instead of reading it again.
+type statCache struct {
+	mu   sync.Mutex
+	size int64
+	mod  time.Time
+	b    []byte
+}
+
+var magpieProviders statCache
+
+func (c *statCache) read(path string) ([]byte, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.b != nil && fi.Size() == c.size && fi.ModTime().Equal(c.mod) {
+		return c.b, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	c.b, c.size, c.mod = b, fi.Size(), fi.ModTime()
+	return b, nil
 }
 
 func (m MagpieProbe) lists(alias string) bool {
@@ -519,22 +558,34 @@ func magpieGatewayUp() *bool {
 	return gwState
 }
 
+// probeAccess checks each way in. The checks do not depend on one another (the tailnet
+// probe, the Magpie gateway CLI, the local MCP port), so they run together and a probe
+// takes as long as the slowest rather than their sum.
 func probeAccess(tsURL, mcpURL string) Access {
-	a := Access{At: time.Now(), Llama: probeLlama(tsURL)}
+	a := Access{At: time.Now()}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); a.Llama = probeLlama(tsURL) }()
+	go func() {
+		defer wg.Done()
+		host := "127.0.0.1:3426"
+		if u, err := url.Parse(mcpURL); err == nil && u.Host != "" {
+			host = u.Host
+		}
+		if conn, err := net.DialTimeout("tcp", host, 1500*time.Millisecond); err == nil {
+			conn.Close()
+			a.MCPUp = true
+		} else {
+			a.MCPErr = shortErr(err)
+		}
+	}()
 	a.Magpie = findMagpie(tsURL)
 	if a.Magpie.ProviderID != "" {
 		a.Magpie.GatewayUp = magpieGatewayUp()
+	}
+	wg.Wait()
+	if a.Magpie.ProviderID != "" {
 		a.Magpie.Listed = a.Magpie.lists(a.Llama.Alias)
-	}
-	host := "127.0.0.1:3426"
-	if u, err := url.Parse(mcpURL); err == nil && u.Host != "" {
-		host = u.Host
-	}
-	if conn, err := net.DialTimeout("tcp", host, 1500*time.Millisecond); err == nil {
-		conn.Close()
-		a.MCPUp = true
-	} else {
-		a.MCPErr = shortErr(err)
 	}
 	return a
 }

@@ -11,10 +11,7 @@ var gpuChoices = []string{"G4", "H100", "A100", "L4", "T4"}
 var idleChoices = []int{15, 30, 60, 0}
 
 func (a *App) connectionPage(c *ui.Context, p Palette) {
-	ui.Column(c).Gap(6).Children(func() {
-		ui.Text(c, "连接与账号").Font(fontSerif).FontSize(34)
-		ui.Text(c, "绑定 Google 账号，唤醒、找回和释放 Colab 实例。").FontSize(14).TextColor(p.Text3)
-	})
+	pageHeader(c, p, "连接与账号", "绑定 Google 账号，唤醒、找回和释放 Colab 实例。")
 	ui.Row(c).Wrap().Gap(20).AlignItems(ui.Stretch).Children(func() {
 		a.accountCard(c, p).Basis(420).Grow(1).Shrink(1).MinWidth(340)
 		a.runtimeCard(c, p).Basis(420).Grow(1).Shrink(1).MinWidth(340)
@@ -25,7 +22,7 @@ func (a *App) connectionPage(c *ui.Context, p Palette) {
 }
 
 func (a *App) accountCard(c *ui.Context, p Palette) ui.Element {
-	return card(c, p, "Google 账号", "用来申请 Colab GPU 和查官方账本", nil, func() {
+	return card(c, p, 1, "Google 账号", "用来申请 Colab GPU 和查官方账本", nil, func() {
 		switch {
 		case !a.acct.Known:
 			ui.Text(c, "查询中…").TextColor(p.Text3)
@@ -42,7 +39,7 @@ func (a *App) accountCard(c *ui.Context, p Palette) ui.Element {
 			})
 		}
 		if a.binding {
-			ui.Column(c).Gap(8).Padding(14).Radius(12).Background(p.Raised).Children(func() {
+			ui.Column(c.Key("binding")).Gap(8).Padding(14).Radius(12).Background(p.Raised).Transition(rowMotion).Children(func() {
 				ui.Text(c, "在浏览器里完成授权，把页面上显示的授权码粘贴到这里。").FontSize(13).TextColor(p.Text2)
 				ui.Row(c).Gap(8).Children(func() {
 					in := ui.TextInput(c.Key("auth-code"), &a.authCode).Placeholder("授权码").Password().
@@ -74,7 +71,7 @@ func (a *App) accountCard(c *ui.Context, p Palette) ui.Element {
 }
 
 func (a *App) runtimeCard(c *ui.Context, p Palette) ui.Element {
-	return card(c, p, "云端实例", "机房由 Google 按空闲分配，不能指定", nil, func() {
+	return card(c, p, 2, "云端实例", "机房由 Google 按空闲分配，不能指定", nil, func() {
 		code, region := regionOf(a.acct.Endpoint)
 		ui.Row(c).Wrap().GapX(32).GapY(12).Children(func() {
 			metric(c, p, "运行中的实例", fmt.Sprintf("%d 台", a.acct.Active), "", 20, p.Text)
@@ -116,7 +113,7 @@ func (a *App) runtimeCard(c *ui.Context, p Palette) ui.Element {
 }
 
 func (a *App) serverCard(c *ui.Context, p Palette) {
-	card(c, p, "服务地址", "云端服务端的公网地址；丢了会自动从云端找回", nil, func() {
+	card(c, p, 3, "服务地址", "云端服务端的公网地址；丢了会自动从云端找回", nil, func() {
 		ui.Row(c).Gap(8).Children(func() {
 			in := ui.TextInput(c.Key("url"), &a.urlDraft).Placeholder("https://xxxx.gradio.live（留空点「找回」）").
 				Font(fontMono).FontSize(13).Grow(1).Shrink(1).MinWidth(120).Label("服务地址")
@@ -145,14 +142,14 @@ func (a *App) serverCard(c *ui.Context, p Palette) {
 			col, text = p.Danger, fmt.Sprintf("连不上（已失败 %d 次）", a.failures)
 		}
 		ui.Row(c).Gap(8).Children(func() {
-			dot(c, col, 7)
-			ui.Text(c, text).FontSize(13).TextColor(p.Text2)
+			statusDot(c, col, 7, a.discovering)
+			ui.Text(c, text).FontSize(13).TextColor(p.Text2).ContentTransition(crossfade)
 		})
 	})
 }
 
 func (a *App) idleCard(c *ui.Context, p Palette) {
-	card(c, p, "自动释放", "闲置这么久没人用就释放实例，网页 / Magpie / MCP 的对话都算在用", nil, func() {
+	card(c, p, 4, "自动释放", "闲置这么久没人用就释放实例，网页 / Magpie / MCP 的对话都算在用", nil, func() {
 		labels := []string{"15 分钟", "30 分钟", "60 分钟", "关闭"}
 		idx := 1
 		for i, m := range idleChoices {
@@ -164,13 +161,14 @@ func (a *App) idleCard(c *ui.Context, p Palette) {
 			a.setIdle(idleChoices[idx])
 		}
 		if a.idleMin == 0 {
-			ui.Text(c, "关闭后会一直计费直到你手动释放（后台保活最多撑 24 小时）。").FontSize(13).TextColor(p.Warning)
+			ui.Text(c.Key("idle-off"), "关闭后会一直计费直到你手动释放（后台保活最多撑 24 小时）。").FontSize(13).TextColor(p.Warning).
+				Transition(rowMotion)
 		}
 	})
 }
 
 func (a *App) urlsCard(c *ui.Context, p Palette) {
-	card(c, p, "接入地址", "网页对话与 API 走 Tailscale Service；MCP 小说桥在本机", nil, func() {
+	card(c, p, 5, "接入地址", "网页对话与 API 走 Tailscale Service；MCP 小说桥在本机", nil, func() {
 		field := func(label, key, hint string, v *string) {
 			ui.Column(c).Gap(6).Children(func() {
 				ui.Text(c, label).FontSize(12).TextColor(p.Text3)

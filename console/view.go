@@ -11,22 +11,50 @@ import (
 // view is the whole window: a top bar that never scrolls (status, money, the three
 // actions used most), a left rail (pages + model library), the page, and a log drawer.
 func (a *App) view(c *ui.Context) {
-	p := a.pal()
+	root := ui.Column(c).Fill()
+	// Switching themes crossfades every color of the palette rather than flashing.
+	light := float32(0)
+	if a.themeName == "light" {
+		light = 1
+	}
+	p := blendPalette(root.AnimateTo("theme", light, fadeTheme))
+	if !root.Settled("theme") {
+		// The blend alone carries every color: the elements' own color easings would
+		// trail it by their duration and make the switch feel twice as long.
+		c.DisableAnimations()
+	}
 	applyTheme(c, p)
 	a.dialogs(c)
 	if a.toast != "" {
 		c.Toast(a.toast)
 		a.toast = ""
 	}
-	ui.Column(c).Fill().Background(p.Bg).Children(func() {
+	root.Background(p.Bg).Children(func() {
 		a.topBar(c, p)
-		ui.Row(c).Grow(1).AlignItems(ui.Stretch).Children(func() {
+		body := ui.Row(c).Grow(1).AlignItems(ui.Stretch)
+		// The drawer's width rides a spring and the split beside it takes the rest, so the
+		// page narrows in step as the log slides in from the right edge.
+		open := float32(0)
+		if a.logsOpen {
+			open = 1
+		}
+		drawer := body.AnimateTo("drawer", open, springEnter)
+		body.Children(func() {
 			ui.Split(c, &a.navWidth, func() { a.nav(c, p) }, func() { a.page_(c, p) }).Grow(1)
-			if a.logsOpen {
-				a.logPanel(c, p)
+			if drawer > 0.002 {
+				a.logPanel(c, p, drawer)
 			}
 		})
 	})
+}
+
+// busy reports a job in flight, the only time the status lights pulse.
+func (a *App) busy() bool {
+	st := a.status
+	loading := st != nil && a.connected && (st.IsLoading || st.IsDownloading)
+	inferring := st != nil && a.connected && st.LLM != nil && st.LLM.SlotsBusy > 0
+	recovering := !a.connected && a.acct.Active > 0
+	return a.waking || a.releasing || a.discovering || a.switching != "" || loading || inferring || recovering
 }
 
 // ─── Top bar ──────────────────────────────────────────────────────────────────
@@ -37,12 +65,13 @@ func (a *App) topBar(c *ui.Context, p Palette) {
 		ui.Text(c, "Colab-yoga").Font(fontSerif).FontSize(22).NoWrap()
 		ui.Box(c).Width(1).Height(22).Background(p.BorderStrong)
 		col, text := a.runtimeLine(p)
-		dot(c, col, 9)
-		ui.Text(c, text).SingleLine().Grow(1).Shrink(1).MinWidth(60).TextColor(p.Text2).Tooltip(text)
+		statusDot(c, col, 9, a.busy())
+		ui.Text(c, text).SingleLine().Grow(1).Shrink(1).MinWidth(60).TextColor(p.Text2).Tooltip(text).
+			ContentTransition(morph)
 		if a.acct.Known && a.acct.LoggedIn {
-			ui.Text(c, fmt.Sprintf("余额 %s CU · %.2f CU/h", thousands(a.acct.Balance), a.acct.Burn)).
-				Font(fontMono).FontFeatures("tnum").FontSize(13).NoWrap().
-				TextColor(map[bool]ui.Color{true: p.Accent, false: p.Text2}[a.acct.Burn > 0])
+			money := ui.Text(c, fmt.Sprintf("余额 %s CU · %.2f CU/h", thousands(a.acct.Balance), a.acct.Burn)).
+				Font(fontMono).FontFeatures("tnum").FontSize(13).NoWrap().ContentTransition(numericDown)
+			money.TextColor(money.AnimateColor("c", map[bool]ui.Color{true: p.Accent, false: p.Text2}[a.acct.Burn > 0], fadeColor))
 		}
 		inkButton(c, p, "打开网页对话").Disabled(a.tsURL == "").OnClick(a.openWeb)
 		outlineButton(c, p, "续时").Disabled(!a.connected).Tooltip("重置闲置自动释放倒计时").OnClick(a.touch)
@@ -53,7 +82,7 @@ func (a *App) topBar(c *ui.Context, p Palette) {
 			a.logsAlert = false
 		})
 		if a.logsAlert {
-			logs.Children(func() { dot(c, p.Danger, 7).Absolute().Top(4).Right(4) })
+			logs.Children(func() { dot(c, p.Danger, 7).Absolute().Top(4).Right(4).Transition(popIn) })
 		}
 	})
 }
@@ -106,7 +135,7 @@ func (a *App) nav(c *ui.Context, p Palette) {
 		})
 		served, _, online := a.servedModel()
 		for i := range catalog {
-			a.modelRow(c, p, &catalog[i], online && served == catalog[i].ID)
+			a.modelRow(c, p, &catalog[i], online && served == catalog[i].ID, i)
 		}
 
 		ui.Spacer(c).MinHeight(20)
@@ -124,25 +153,49 @@ func (a *App) navItem(c *ui.Context, p Palette, page, title, sub string) {
 	a.navRow(c, p, title, sub, a.page == page).OnClick(func() { a.page = page })
 }
 
+// navHighlight is the identity of the active page's highlight: one element that, as the
+// page changes, flies from the row it left to the one chosen (a shared-element
+// transition, as motion.dev's layoutId), rather than one fading out as another fades in.
+type navHighlight struct{}
+
 func (a *App) navRow(c *ui.Context, p Palette, title, sub string, active bool) ui.Element {
 	row := ui.Box(c.Key(title)).Padding(10, 12).Radius(10).Gap(2).Cursor(ui.CursorPointer).Role(ui.RoleButton).Label(title)
-	switch {
-	case active:
-		row.Background(p.Raised).BorderWidth(0, 0, 0, 3).BorderColor(p.Accent)
-	case row.Hovered():
-		row.Background(p.Raised.Alpha(0.6))
+	if !active && row.Hovered() {
+		row.Background(p.Raised.Alpha(0.55))
+	} else {
+		row.Background(p.Raised.Alpha(0))
 	}
+	press := ui.Pose{}
+	if row.Pressed() {
+		press.Scale = 0.98
+	}
+	row.Transition(colorMotion).AnimatePose(press, springLift)
 	return row.Children(func() {
-		ui.Text(c, title).FontSize(14).FontWeight(map[bool]int{true: 650, false: 500}[active])
+		if active {
+			ui.Box(c.Key("highlight")).Absolute().Fill().ZIndex(-1).IgnoreInput(true).Radius(10).Background(p.Raised).
+				Transition(ui.ElementTransition{Match: navHighlight{}, Animation: &springPop}).Children(func() {
+				ui.Box(c).Absolute().Left(0).Top(9).Bottom(9).Width(3).Radius(2).Background(p.Accent)
+			})
+		}
+		t := ui.Text(c, title).FontSize(14).FontWeight(map[bool]int{true: 650, false: 500}[active])
+		t.TextColor(t.AnimateColor("c", map[bool]ui.Color{true: p.Text, false: p.Text2}[active], fadeColor))
 		ui.Text(c, sub).FontSize(12).TextColor(p.Text3).SingleLine()
 	})
 }
 
-func (a *App) modelRow(c *ui.Context, p Palette, m *Model, running bool) {
-	box := ui.Column(c.Key(m.ID)).Padding(10, 12).Radius(10).Gap(3).Border(1, p.Border).Background(p.Card)
-	if running {
-		box.Border(1.5, p.Success)
+func (a *App) modelRow(c *ui.Context, p Palette, m *Model, running bool, i int) {
+	box := ui.Column(c.Key(m.ID)).Padding(10, 12).Radius(10).Gap(3).Background(p.Card)
+	border := p.Border
+	switch {
+	case running:
+		border = p.Success
+	case a.switching == m.ID:
+		border = p.Warning.Alpha(0.7)
+	case box.Hovered():
+		border = p.BorderStrong
 	}
+	box.Border(1.5, border).Transition(colorMotion)
+	arrive(c, box, time.Duration(i+2)*stagger, true)
 	box.Children(func() {
 		ui.Row(c).Gap(8).Children(func() {
 			ui.Text(c, m.Name).FontSize(13).FontWeight(600).SingleLine().Grow(1).Shrink(1).MinWidth(40).Tooltip(m.Name)
@@ -163,6 +216,11 @@ func (a *App) modelRow(c *ui.Context, p Palette, m *Model, running bool) {
 		}
 		ui.Text(c, strings.TrimPrefix(fmt.Sprintf("%s · %.0f GB", strings.Join(tags, " · "), m.SizeGB), " · ")).
 			FontSize(12).TextColor(p.Text3).SingleLine()
+		if a.switching == m.ID {
+			// A shimmer along the row's foot while its model downloads and loads.
+			ui.Box(c.Key("loading")).Height(2).FillWidth().Margin(4, 0, 0, 0).Transition(rowMotion).
+				Draw(func(pt *ui.Painter, r ui.Rect) { sweep(pt, r, p.Warning, 1) })
+		}
 	})
 	box.Margin(0, 0, 6, 0)
 }
@@ -171,7 +229,10 @@ func (a *App) modelRow(c *ui.Context, p Palette, m *Model, running bool) {
 
 func (a *App) page_(c *ui.Context, p Palette) {
 	ui.Scroll(c).Fill().Children(func() {
-		ui.Column(c).FillWidth().MaxWidth(1240).Margin(0, ui.Auto).Padding(28, 32, 36, 32).Gap(22).Children(func() {
+		// Keyed by page: the page left lifts and fades out over the next, whose header and
+		// cards rise in one after another (arrive).
+		ui.Column(c.Key("page-"+a.page)).FillWidth().MaxWidth(1240).Margin(0, ui.Auto).Padding(28, 32, 36, 32).Gap(22).
+			Transition(pageMotion).Children(func() {
 			switch a.page {
 			case "connection":
 				a.connectionPage(c, p)
@@ -182,11 +243,28 @@ func (a *App) page_(c *ui.Context, p Palette) {
 	})
 }
 
+// pageHeader is a page's title and subtitle, the first to arrive when the page shows.
+func pageHeader(c *ui.Context, p Palette, title, sub string) {
+	h := ui.Column(c.Key("header")).Gap(6)
+	arrive(c, h, 0, false)
+	h.Children(func() {
+		ui.Text(c, title).Font(fontSerif).FontSize(34)
+		ui.Text(c, sub).FontSize(14).TextColor(p.Text3).ContentTransition(numeric)
+	})
+}
+
 // ─── Log drawer ───────────────────────────────────────────────────────────────
 
-func (a *App) logPanel(c *ui.Context, p Palette) {
-	ui.Column(c).Width(400).Background(p.Panel).BorderWidth(0, 0, 0, 1).BorderColor(p.Border).
-		Padding(16).Gap(10).Children(func() {
+func (a *App) logPanel(c *ui.Context, p Palette, shown float32) {
+	const w = 400
+	ui.Box(c.Key("logs")).Width(w*max(shown, 0)).ClipX().Background(p.Panel).
+		BorderWidth(0, 0, 0, 1).BorderColor(p.Border).Children(func() {
+		a.logBody(c, p).Absolute().Top(0).Bottom(0).Right(0).Width(w).Opacity(min(1, shown*1.4))
+	})
+}
+
+func (a *App) logBody(c *ui.Context, p Palette) ui.Element {
+	return ui.Column(c).Padding(16).Gap(10).Children(func() {
 		ui.Row(c).Gap(8).Children(func() {
 			ui.Text(c, "运行日志").Font(fontSerif).FontSize(18).Grow(1)
 			ghostButton(c, p, "复制").OnClick(func() {
@@ -245,16 +323,23 @@ func (a *App) dialogs(c *ui.Context) {
 
 // ─── Small pieces in the Anthropic look ───────────────────────────────────────
 
+// pill is a status badge. Its tint eases to a new state's color, its width springs to
+// fit the new word, and the word crossfades with a short blur.
 func pill(c *ui.Context, text string, col ui.Color) ui.Element {
-	return ui.Box(c).Padding(3, 10).Radius(999).Background(col.Alpha(0.16)).Children(func() {
-		ui.Text(c, text).FontSize(12).FontWeight(600).TextColor(col).NoWrap()
+	b := ui.Box(c).Padding(3, 10).Radius(999).Background(col.Alpha(0.16)).
+		Transition(ui.ElementTransition{Colors: true, Width: true, Animation: &springSize})
+	return b.Children(func() {
+		t := ui.Text(c, text).FontSize(12).FontWeight(600).NoWrap().ContentTransition(crossfade)
+		t.TextColor(t.AnimateColor("c", col, fadeColor))
 	})
 }
 
 func dot(c *ui.Context, col ui.Color, size float32) ui.Element {
-	return ui.Box(c).Size(size, size).Radius(size).Background(col).Shadow(0, 0, 0, 2, col.Alpha(0.22))
+	return statusDot(c, col, size, false)
 }
 
+// styleButton gives a button its look and its feel: colors ease on hover, and a press
+// sinks it slightly on a spring that bounces back on release.
 func styleButton(b ui.Element, bg, hover, fg, border ui.Color) ui.Element {
 	b.Padding(7, 16).Radius(8).TextColor(fg).Border(1, border).FontSize(13).FontWeight(600)
 	if b.Hovered() && !b.IsDisabled() {
@@ -262,7 +347,11 @@ func styleButton(b ui.Element, bg, hover, fg, border ui.Color) ui.Element {
 	} else {
 		b.Background(bg)
 	}
-	return b
+	press := ui.Pose{}
+	if b.Pressed() && !b.IsDisabled() {
+		press.Scale = 0.96
+	}
+	return b.Transition(colorMotion).AnimatePose(press, springLift)
 }
 
 func inkButton(c *ui.Context, p Palette, label string) ui.Element {
@@ -285,9 +374,17 @@ func accentButton(c *ui.Context, p Palette, label string) ui.Element {
 	return styleButton(ui.Button(c, label), p.Accent, p.AccentHover, p.AccentText, p.Accent)
 }
 
-// card is the page's unit: a serif title, a quiet subtitle, an optional badge.
-func card(c *ui.Context, p Palette, title, sub string, badge func(), body func()) ui.Element {
-	return ui.Column(c.Key(title)).Padding(24).Gap(18).Radius(16).Background(p.Card).Border(1, p.Border).Children(func() {
+// card is the page's unit: a serif title, a quiet subtitle, an optional badge. It rises
+// in order (nth) when its page shows, and its border brightens under the pointer.
+func card(c *ui.Context, p Palette, nth int, title, sub string, badge func(), body func()) ui.Element {
+	box := ui.Column(c.Key(title)).Padding(24).Gap(18).Radius(16).Background(p.Card)
+	border := p.Border
+	if box.Hovered() {
+		border = p.BorderStrong
+	}
+	box.Border(1, border).Transition(colorMotion)
+	arrive(c, box, time.Duration(nth)*stagger, false)
+	return box.Children(func() {
 		ui.Row(c).Gap(12).AlignItems(ui.Start).Children(func() {
 			ui.Column(c).Grow(1).Shrink(1).Gap(4).Children(func() {
 				ui.Text(c, title).Font(fontSerif).FontSize(22)
@@ -304,9 +401,16 @@ func card(c *ui.Context, p Palette, title, sub string, badge func(), body func()
 }
 
 func metric(c *ui.Context, p Palette, label, value, sub string, size float32, col ui.Color) ui.Element {
+	return metricRoll(c, p, label, value, sub, size, col, crossfade)
+}
+
+// metricRoll is a metric whose digits roll to each new value, as an odometer: up for
+// what grows (time, money spent), down (numericDown) for what runs out.
+func metricRoll(c *ui.Context, p Palette, label, value, sub string, size float32, col ui.Color, roll ui.ContentTransition) ui.Element {
 	return ui.Column(c).Gap(3).Children(func() {
 		ui.Text(c, label).FontSize(12).TextColor(p.Text3).NoWrap()
-		ui.Text(c, value).Font(fontMono).FontFeatures("tnum").FontSize(size).TextColor(col).NoWrap()
+		v := ui.Text(c, value).Font(fontMono).FontFeatures("tnum").FontSize(size).NoWrap().ContentTransition(roll)
+		v.TextColor(v.AnimateColor("c", col, fadeColor))
 		if sub != "" {
 			ui.Text(c, sub).FontSize(12).TextColor(p.Text3)
 		}

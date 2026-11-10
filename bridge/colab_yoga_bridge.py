@@ -19,9 +19,8 @@ import re
 import sys
 import json
 import time
-import uuid
+import threading
 import argparse
-from importlib import resources
 
 import requests
 from google.auth.transport.requests import Request
@@ -53,8 +52,33 @@ from colab_cli.client import (
     ColabRequestError,
 )
 from colab_cli.state import SessionState
-from colab_cli.runtime import ColabRuntime
-from colab_cli.contents import ContentsClient
+
+
+class _Lazy:
+    """Stands in for a class from a module only wake/stop_all/discover/keeper need, so the
+    other commands (auth_status runs in a fresh process every 40-80 s) skip importing it:
+    colab_cli.runtime pulls in the Jupyter kernel client and rich, about 80 ms. Calling it or
+    reading an attribute loads the real class; replacing the module attribute (tests) works."""
+
+    def __init__(self, module: str, name: str):
+        self._module, self._name, self._real = module, name, None
+
+    def _load(self):
+        if self._real is None:
+            import importlib
+
+            self._real = getattr(importlib.import_module(self._module), self._name)
+        return self._real
+
+    def __call__(self, *args, **kwargs):
+        return self._load()(*args, **kwargs)
+
+    def __getattr__(self, attr):
+        return getattr(self._load(), attr)
+
+
+ColabRuntime = _Lazy("colab_cli.runtime", "ColabRuntime")
+ContentsClient = _Lazy("colab_cli.contents", "ContentsClient")
 
 
 def _load_client_config() -> dict:
@@ -62,21 +86,30 @@ def _load_client_config() -> dict:
     if os.path.exists(cfg_path):
         with open(cfg_path, "r", encoding="utf-8") as f:
             return json.load(f)
+    from importlib import resources
+
     res = resources.files("colab_cli").joinpath("oauth_config.json")
     return json.loads(res.read_text(encoding="utf-8"))
 
 
+_CHECKED_CREDS = None  # what _has_valid_token just validated or refreshed, for the same process to reuse
+
+
 def _has_valid_token() -> bool:
+    global _CHECKED_CREDS
+    _CHECKED_CREDS = None
     if not os.path.exists(TOKEN_CONFIG_PATH):
         return False
     try:
         creds = Credentials.from_authorized_user_file(TOKEN_CONFIG_PATH, PUBLIC_SCOPES)
         if creds and creds.valid:
+            _CHECKED_CREDS = creds
             return True
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
             with open(TOKEN_CONFIG_PATH, "w", encoding="utf-8") as f:
                 f.write(creds.to_json())
+            _CHECKED_CREDS = creds
             return True
     except Exception:
         return False
@@ -105,7 +138,9 @@ def _get_account_email() -> str:
     if not os.path.exists(TOKEN_CONFIG_PATH):
         return ""
     try:
-        creds = Credentials.from_authorized_user_file(TOKEN_CONFIG_PATH, PUBLIC_SCOPES)
+        creds = _CHECKED_CREDS
+        if creds is None or not creds.valid:
+            creds = Credentials.from_authorized_user_file(TOKEN_CONFIG_PATH, PUBLIC_SCOPES)
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
             with open(TOKEN_CONFIG_PATH, "w", encoding="utf-8") as f:
@@ -200,14 +235,43 @@ def _safe_sync_sessions(with_status: bool = False):
             time.sleep(1.2)
 
 
+def _run_together(*fns):
+    """Run the callables on their own threads and return [(ok, value_or_exception), ...] in
+    order. The account calls in auth_status are independent network round trips, so their
+    waits overlap instead of adding up."""
+    slots = [None] * len(fns)
+
+    def runner(i, fn):
+        try:
+            slots[i] = (True, fn())
+        except BaseException as e:  # SystemExit from colab_cli must not vanish with the thread
+            slots[i] = (False, e)
+
+    threads = [threading.Thread(target=runner, args=(i, fn), daemon=True) for i, fn in enumerate(fns[1:], 1)]
+    for t in threads:
+        t.start()
+    runner(0, fns[0])
+    for t in threads:
+        t.join()
+    return slots
+
+
 def cmd_auth_status():
     if not _has_valid_token():
         print(json.dumps({"ok": True, "logged_in": False}))
         return
 
+    email = None
     try:
-        info = state.client.get_consumption_user_info()
-        local_sessions, assignments = _safe_sync_sessions()
+        client = state.client  # build the authorized session once, before the calls fan out
+        (info_ok, info), (sync_ok, synced), (mail_ok, mail) = _run_together(
+            client.get_consumption_user_info, _safe_sync_sessions, _get_account_email)
+        email = mail if mail_ok else None
+        if not info_ok:
+            raise info
+        if not sync_ok:
+            raise synced
+        local_sessions, assignments = synced
         name_by_ep = {s.endpoint: s.name for s in local_sessions.values()}
         sess_list = []
         for a in assignments:
@@ -219,7 +283,8 @@ def cmd_auth_status():
                 "shape": a.machine_shape.name,
             })
 
-        email = _get_account_email()
+        if email is None:
+            email = _get_account_email()
         print(json.dumps({
             "ok": True,
             "logged_in": True,
@@ -233,7 +298,7 @@ def cmd_auth_status():
         print(json.dumps({
             "ok": False,
             "logged_in": True,
-            "email": _get_account_email(),
+            "email": email if email is not None else _get_account_email(),
             "error": str(e),
         }))
 
@@ -350,17 +415,23 @@ def _resolve_gpu_accel(gpu_type: str) -> Accelerator:
     return GPU_ACCEL_MAP.get((gpu_type or "g4").strip().lower(), Accelerator.G4)
 
 
+def _new_uuid():
+    import uuid
+
+    return uuid.uuid4()
+
+
 def _allocate_fresh_session(session_name: str, gpu_type: str) -> SessionState:
     accel = _resolve_gpu_accel(gpu_type)
     shape = None if accel in SINGLE_SHAPE_GPUS else resolve_assign_shape(accel, high_mem=True)
     gpu_desc = "G4 (RTX PRO 6000 · 96GB)" if accel == Accelerator.G4 else accel.value
     print(f"WAKE_LOG: 🚀 正在向 Google Colab 申请分配 {gpu_desc} 实例...", flush=True)
     try:
-        res = state.client.assign(uuid.uuid4(), variant=Variant.GPU, accelerator=accel, shape=shape)
+        res = state.client.assign(_new_uuid(), variant=Variant.GPU, accelerator=accel, shape=shape)
     except ColabRequestError as req_err:
         if shape is not None and getattr(getattr(req_err, "response", None), "status_code", None) == 400:
             shape = None
-            res = state.client.assign(uuid.uuid4(), variant=Variant.GPU, accelerator=accel, shape=None)
+            res = state.client.assign(_new_uuid(), variant=Variant.GPU, accelerator=accel, shape=None)
         else:
             raise
     if isinstance(res, PostAssignmentResponse):
@@ -745,6 +816,18 @@ def _track_a_covers(endpoint: str) -> bool:
     return False
 
 
+_HTTP = None
+
+
+def _http():
+    """One requests.Session for the keeper's every-30-s kernel lookups, so the TLS connection
+    to the Colab proxy is reused between beats instead of re-negotiated each time."""
+    global _HTTP
+    if _HTTP is None:
+        _HTTP = requests.Session()
+    return _HTTP
+
+
 def _exec_on_session(s, code: str, timeout: int = 40) -> list:
     """Run code in the runtime's existing kernel (the execution itself is the heartbeat)."""
     base_url = s.url.rstrip("/")
@@ -757,7 +840,7 @@ def _exec_on_session(s, code: str, timeout: int = 40) -> list:
     params = {"authuser": "0", "colab-runtime-proxy-token": s.token}
     kid = s.kernel_id
     try:
-        r = requests.get(f"{base_url}/api/kernels", headers=headers, params=params, timeout=10)
+        r = _http().get(f"{base_url}/api/kernels", headers=headers, params=params, timeout=10)
         if r.status_code == 200:
             known = [k.get("id") for k in (r.json() if r.text else []) if k.get("id")]
             if known and kid not in known:
