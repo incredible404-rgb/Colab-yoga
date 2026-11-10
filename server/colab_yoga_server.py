@@ -27,7 +27,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-SERVER_VERSION = "1.1.0"
+SERVER_VERSION = "1.2.0"
 SERVER_PORT = 7860
 RUNNERS_FILE = "/content/colab_kernel_runners.json"
 APP_LOG = "/var/colab/app.log"
