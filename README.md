@@ -67,7 +67,7 @@ py -3 tools/package.py --out <仓库之外的目录>
 
 ## 给 agent 用
 
-[skills/colab-yoga/SKILL.md](skills/colab-yoga/SKILL.md) 是给 Claude Code、Codex 等 agent 的技能：安装、绑定账号、唤醒 / 释放、查余额与模型、切换模型，花钱的动作会先向你确认。把 `skills/colab-yoga` 整个文件夹复制到 agent 的技能目录（如 `~/.claude/skills/` 或 `~/.agents/skills/`）即可；模型本身的部署见 [colab-gpu-llm-service](https://github.com/incredible404-rgb/colab-gpu-llm-service) 自带的技能。
+[skills/colab-yoga/SKILL.md](skills/colab-yoga/SKILL.md) 是给 Claude Code、Codex 等 agent 的技能：安装、绑定账号、唤醒 / 释放、查余额与模型、切换模型，花钱的动作会先向你确认。把 `skills/colab-yoga` 整个文件夹（含服务端接口说明 `references/api.md`）复制到 agent 的技能目录（如 `~/.claude/skills/` 或 `~/.agents/skills/`）即可，免安装包里同一个文件夹在 `skills\colab-yoga\`；模型本身的部署见 [colab-gpu-llm-service](https://github.com/incredible404-rgb/colab-gpu-llm-service) 自带的技能。
 
 ## 日常使用
 

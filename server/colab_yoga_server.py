@@ -1,7 +1,7 @@
 """Colab-yoga server: runs on the Colab VM next to llama-server :8081.
 
 Derived from EasyColab's app.py (wy51ai, Apache 2.0), reduced to what the Colab-yoga
-console needs: an HTTP API (see docs/architecture.md), live telemetry, the colab_kernel
+console needs: an HTTP API (see skills/colab-yoga/references/api.md), live telemetry, the colab_kernel
 runner boot, an idle watchdog that releases the runtime, and the detached MCP forwarder.
 Conversations never pass through here; web, Magpie and MCP reach llama-server directly.
 """
@@ -38,7 +38,7 @@ LAST_ACTIVE_TIME = time.time()
 IDLE_TIMEOUT_MINUTES = 30  # 0 turns the auto-release off
 CONTEXT_LENGTH = 262144  # what the console asked for (the runner scripts fix 256K per slot)
 
-# Control API bearer token (see docs/architecture.md, "HTTP API"). The wake uploads it to
+# Control API bearer token (see docs/architecture.md, "Control token"). The wake uploads it to
 # API_TOKEN_FILE; COLAB_YOGA_TOKEN in the environment wins when set. With neither, the
 # server makes one and writes it there, so discover_url can still hand it to the owner.
 API_TOKEN_FILE = "/content/colab_yoga_token"
@@ -1201,7 +1201,7 @@ def _idle_watchdog_loop() -> None:
 
 
 # ==============================================================================
-# HTTP API (the contract is in docs/architecture.md)
+# HTTP API (the contract is in skills/colab-yoga/references/api.md)
 # ==============================================================================
 class LoadModelRequest(BaseModel):
     model_id: str = ""

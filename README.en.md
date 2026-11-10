@@ -67,7 +67,7 @@ It stages the package the same way an install does, in a temporary directory, zi
 
 ## For agents
 
-[skills/colab-yoga/SKILL.md](skills/colab-yoga/SKILL.md) is a skill for Claude Code, Codex and other agents: install, bind the account, wake / release, read balance and model, switch models; anything that spends money is confirmed with you first. Copy the whole `skills/colab-yoga` folder into the agent's skills directory (e.g. `~/.claude/skills/` or `~/.agents/skills/`). Model deployment itself is covered by the skill that ships with [colab-gpu-llm-service](https://github.com/incredible404-rgb/colab-gpu-llm-service).
+[skills/colab-yoga/SKILL.md](skills/colab-yoga/SKILL.md) is a skill for Claude Code, Codex and other agents: install, bind the account, wake / release, read balance and model, switch models; anything that spends money is confirmed with you first. Copy the whole `skills/colab-yoga` folder (it includes `references/api.md`, the server API) into the agent's skills directory (e.g. `~/.claude/skills/` or `~/.agents/skills/`). The portable release zip carries the same folder under `skills\colab-yoga\`. Model deployment itself is covered by the skill that ships with [colab-gpu-llm-service](https://github.com/incredible404-rgb/colab-gpu-llm-service).
 
 ## Daily Usage
 

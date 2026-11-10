@@ -9,6 +9,7 @@ Builds the release package: a zip that runs from wherever it is unpacked, no ins
       site-packages/      the bridge's pinned packages (bridge/requirements.txt)
       bridge/colab_yoga_bridge.py
       server/colab_yoga_server.py, vm_boot.py
+      skills/colab-yoga/    the agent skill (SKILL.md, references/api.md), ready to copy
       README.txt, LICENSE, NOTICE
 
 The package is staged exactly like an install (same code as tools/install.py, in a
@@ -71,6 +72,9 @@ move the exe out of it.
 - To start models, colab-gpu-llm-service's colab_kernel.py needs to export its
   colab_kernel_runners.json (it holds your API keys) next to Colab-yoga.exe. This package
   ships without it, on purpose.
+- For an AI agent (Claude Code, Codex, ...): copy skills\\colab-yoga\\ (the whole folder) into
+  the agent's skills directory, e.g. ~/.claude/skills/ or ~/.agents/skills/. It tells the
+  agent how to bind, wake, check and release, and references\\api.md has the server API.
 - Delete the folder to uninstall; delete %LOCALAPPDATA%\\Colab-yoga to forget settings.
 
 Colab-yoga {version}（Windows x64，免安装）
@@ -82,6 +86,9 @@ Colab-yoga {version}（Windows x64，免安装）
 - 第一次使用：在「连接与账号」页绑定 Google 账号。
 - 要启动模型，需要 colab-gpu-llm-service 的 colab_kernel.py 把 colab_kernel_runners.json
   （含你的 API 密钥）导出到 Colab-yoga.exe 旁边。本包不带这个文件，是故意的。
+- 给 AI agent（Claude Code、Codex 等）用：把 skills\\colab-yoga\\ 整个文件夹复制到 agent 的
+  技能目录（如 ~/.claude/skills/ 或 ~/.agents/skills/）。技能讲清绑定、唤醒、查看、释放怎么做，
+  references\\api.md 是服务端接口说明。
 - 卸载：删除这个文件夹；想连设置一起清掉，再删 %LOCALAPPDATA%\\Colab-yoga。
 
 Source and docs / 源码与文档: https://github.com/incredible404-rgb/Colab-yoga
@@ -113,6 +120,13 @@ def stage(paths: install.InstallPaths, exe: Path, embed_zip: str | None, version
         (target / name).write_text(text, encoding="utf-8", newline="\r\n")
     for name in ("LICENSE", "NOTICE"):
         shutil.copy2(paths.repo / name, target / name)
+    skill_src = paths.repo / "skills" / "colab-yoga"
+    if not (skill_src / "SKILL.md").is_file():
+        raise SystemExit(f"package: {skill_src} has no SKILL.md")
+    shutil.copytree(
+        skill_src, target / "skills" / "colab-yoga", dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
     return target
 
 

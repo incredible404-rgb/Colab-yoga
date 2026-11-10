@@ -23,6 +23,7 @@ runtime\python.exe, runtime\pythonw.exe   python.org embeddable CPython 3.12.10 
 site-packages\                           the packages pinned in bridge/requirements.txt (51 wheels)
 bridge\colab_yoga_bridge.py
 server\colab_yoga_server.py, server\vm_boot.py
+skills\colab-yoga\SKILL.md, references\api.md   release zip only: the agent skill, copy this folder into an agent's skills directory
 colab_kernel_runners.json                 not part of the repo or a release; exported here by colab-gpu-llm-service
 ```
 
@@ -96,42 +97,31 @@ removed as links (never recursed into); a directory that is not exactly that lay
   forwarder `/content/colab_yoga_mcp_bridge.py`.
 - The server listens on `0.0.0.0:7860` and, once its public tunnel is up, prints one line
   `COLAB_YOGA_URL=https://…` to its log. Wake, discover and the keeper find the URL by that line.
+- A failed `wake` (upload, boot, tunnel) gives back an instance that this very call
+  allocated, then prints `WAKE_ERROR:` and exits 1; a reused instance is left running. A
+  successful one exits 0 after `WAKE_URL:`. The console takes the outcome from those two
+  line prefixes and does not notify twice for the exit code.
 - Wake never kills llama-server :8081 or the MCP forwarder. It kills an older server of either
   name (`/content/colab_yoga_server.py`, legacy `/content/app.py`) so only one idle watchdog runs.
 - The Colab session name in `~/.config/colab-cli/sessions.json` is `easycolab`, shared with
   `colab_cli.py` (which also accepts `colab-yoga`). It is an internal identifier, not a path,
   and renaming it would orphan a live runtime's session, so it is kept on purpose.
 - The Google token `~/.config/colab-cli/token.json` and `sessions.json` are shared with
-  colab-gpu-llm-service. `auth_code` therefore clears the session records only when the new
-  authorisation belongs to a different account than the one bound before (compared by email);
-  authorising the same account again leaves the running sessions alone. Check `auth_status`
-  first: when `logged_in` is already true there is nothing to bind.
+  colab-gpu-llm-service. `auth_code` compares the new account's email with the previous
+  one (read with the old token, else from the remembered profile in `account_profile.json`,
+  because an old token that can no longer refresh is the usual reason to rebind). The same
+  account again leaves the running sessions alone; for another or an unidentifiable account
+  it removes only the records whose endpoint the new account does not hold, and removes
+  nothing when the new account's assignments cannot be read. Check `auth_status` first:
+  when `logged_in` is already true there is nothing to bind.
 
 ## HTTP API (server, JSON)
 
-Every call except `GET /api/status` needs `Authorization: Bearer <token>` (see "Control token"
-above); without it the answer is 401. `/api/status` stays open so the keeper and a quick check
-need nothing.
-
-| Method | Path | Auth | Body | |
-|---|---|---|---|---|
-| GET | `/api/status` | none | | status below |
-| POST | `/api/load_model` | Bearer | `{model_id, context_length, hf_token}` | start the runner of `model_id` (a slug in the runners file; required, 400 without it); replaces what runs on :8081; returns status |
-| POST | `/api/unload_model` | Bearer | `{model_id}` | stop :8081; returns status |
-| POST | `/api/touch` | Bearer | `{}` | reset the idle countdown; returns status |
-| POST | `/api/config_idle` | Bearer | `{idle_timeout_minutes}` | 0 turns the automatic release off, so the runtime bills until someone releases it; returns status |
-| POST | `/api/disconnect` | Bearer | `{}` | release this runtime now |
-
-Status fields (the console's `Status` struct reads exactly these): `server_version`,
-`gpu_name`, `vram_used_gb`, `vram_total_gb`, `ram_used_gb`, `ram_total_gb`, `disk_used_gb`,
-`disk_total_gb`, `uptime_seconds` (since the runtime's first Jupyter "Kernel started"),
-`session_cu_used`, `cu_burn_rate_per_hour`, `idle_timeout_minutes`, `idle_remaining_seconds`
-(-1 when off), `loaded_model_ids`, `is_downloading`, `is_loading_vram`, `task_progress`,
-`task_message`, `console_lines`, `context_length`, `llm_server` = `{online, alias, model_id,
-slots_total, slots_busy, n_ctx_per_slot, tokens_seen, last_active_age_s, mcp_bridge:
-{listening, owner, reachable, error, checked_age_s}}`. `llm_server.model_id` is the runner slug
-whose `alias` llama-server reports, `""` when that alias is not in the runners file;
-`loaded_model_ids` then lists the alias instead.
+The methods, bodies, answers, authentication and the status fields are written down once, in
+[`skills/colab-yoga/references/api.md`](../skills/colab-yoga/references/api.md): it sits in the
+skill folder so an agent that has only the skill, or the release zip, can read it. Keep it
+there and change it together with `server/colab_yoga_server.py` and the console's `Status`
+struct (`console/backend.go`); this file does not repeat it.
 
 What `/api/status` costs: GPU/RAM/disk telemetry and the :8081 identity probe are cached for
 about 2 s and shared by concurrent polls (one computation, not one per request); the GPU is
@@ -153,7 +143,11 @@ until it is restarted.
   execution every 30 s, which is what stops Colab reclaiming a CLI runtime after 21–35 min.
   In that execution it reads `/api/status` inside the VM; at `idle_remaining_seconds == 0` it
   releases the runtime via the official API. It stops if the server is gone for 20 min, the
-  assignment disappears, a colab_keepalive.py daemon covers the runtime, or after 24 h.
+  assignment disappears, or after 24 h. When a colab_keepalive.py daemon (Track A) already
+  covers the runtime it does not stop at once: it skips its own heartbeat and the in-VM
+  status read for that cycle, and because it then sees no server status it exits with
+  `server_unreachable` once 20 min have passed since it last read one, leaving the daemon
+  to keep the runtime alive.
 - The server's watchdog counts as use: model download/load, and any inference on :8081
   (`/slots`: busy slot, token counters, `id_task`, last-request stamps), which is how web,
   Magpie and MCP chats keep the runtime.
