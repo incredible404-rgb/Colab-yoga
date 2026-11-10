@@ -27,7 +27,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-SERVER_VERSION = "1.0.0"
+SERVER_VERSION = "1.1.0"
 SERVER_PORT = 7860
 RUNNERS_FILE = "/content/colab_kernel_runners.json"
 APP_LOG = "/var/colab/app.log"
@@ -38,20 +38,85 @@ LAST_ACTIVE_TIME = time.time()
 IDLE_TIMEOUT_MINUTES = 30  # 0 turns the auto-release off
 CONTEXT_LENGTH = 262144  # what the console asked for (the runner scripts fix 256K per slot)
 
-# colab_kernel runners are keyed by these ids; llama-server reports the alias.
-KERNEL_MODEL_NAMES = {
+# Control API bearer token (see docs/architecture.md, "HTTP API"). The wake uploads it to
+# API_TOKEN_FILE; COLAB_YOGA_TOKEN in the environment wins when set. With neither, the
+# server makes one and writes it there, so discover_url can still hand it to the owner.
+API_TOKEN_FILE = "/content/colab_yoga_token"
+API_TOKEN = ""
+
+
+def load_api_token() -> str:
+    """Set API_TOKEN from the environment, else API_TOKEN_FILE; make one if neither exists."""
+    global API_TOKEN
+    token = os.environ.get("COLAB_YOGA_TOKEN", "").strip()
+    if not token:
+        try:
+            with open(API_TOKEN_FILE, "r", encoding="utf-8") as f:
+                token = f.read().strip()
+        except OSError:
+            token = ""
+    if not token:
+        token = secrets.token_urlsafe(32)
+        try:
+            with open(API_TOKEN_FILE, "w", encoding="utf-8", newline="") as f:
+                f.write(token)
+        except OSError:
+            pass
+    try:
+        os.chmod(API_TOKEN_FILE, 0o600)
+    except OSError:
+        pass
+    API_TOKEN = token
+    return token
+
+
+def _token_ok(header: str) -> bool:
+    scheme, _, cred = (header or "").partition(" ")
+    if not API_TOKEN or scheme.lower() != "bearer":
+        return False
+    return secrets.compare_digest(cred.strip().encode("utf-8"), API_TOKEN.encode("utf-8"))
+
+
+# The models are whatever RUNNERS_FILE holds: slug -> runner, whose `alias` is the name
+# llama-server reports on /v1/models. These are only nicer display names for the models the
+# author ships; any other model is shown by its alias.
+KNOWN_MODEL_NAMES = {
     "qwen38-huihui-v2": "Qwen3.8-Flash-Next (Huihui v2)",
     "gemma4-31b": "Gemma-4-31B (ARA Heretic Q8_0)",
     "qwen38-27b-rvn": "Qwen3.8-27B (RVN Heretic BF16)",
     "glm53-flash": "GLM-5.3-Flash (320B-A18B 破限)",
 }
-KERNEL_ALIAS_TO_ID = {
-    "Huihui-Qwen3.8-Flash-Next-abliterated-v2-UD-Q4_K_XL": "qwen38-huihui-v2",
-    "Gemma-4-31B-it-ARA-Heretic-Q8_0": "gemma4-31b",
-    "Qwen3.8-27B-RVN-Heretic-BF16": "qwen38-27b-rvn",
-    "GLM-5.3-Flash-Uncensored-GSQ-RCO-Q4": "glm53-flash",
-}
-KERNEL_LLM_IDS = tuple(KERNEL_ALIAS_TO_ID.values())
+_RUNNER_ALIAS_MEMO: Dict[str, Any] = {"sig": None, "map": {}}
+
+
+def runner_alias_to_id() -> Dict[str, str]:
+    """alias -> runner slug for every runner in RUNNERS_FILE; {} when it is missing or
+    unreadable. Re-read only when the file's mtime or size changes."""
+    try:
+        st = os.stat(RUNNERS_FILE)
+    except OSError:
+        _RUNNER_ALIAS_MEMO.update(sig=None, map={})
+        return {}
+    sig = (RUNNERS_FILE, st.st_mtime_ns, st.st_size)
+    if _RUNNER_ALIAS_MEMO["sig"] == sig:
+        return _RUNNER_ALIAS_MEMO["map"]
+    mapping: Dict[str, str] = {}
+    try:
+        with open(RUNNERS_FILE, "r", encoding="utf-8") as f:
+            runners = json.load(f)
+        for slug, info in runners.items():
+            alias = str((info or {}).get("alias") or "").strip() if isinstance(info, dict) else ""
+            if alias:
+                mapping.setdefault(alias, str(slug))
+    except Exception:
+        mapping = {}
+    _RUNNER_ALIAS_MEMO.update(sig=sig, map=mapping)
+    return mapping
+
+
+def model_display_name(model_id: str) -> str:
+    return KNOWN_MODEL_NAMES.get(model_id) or next(
+        (alias for alias, slug in runner_alias_to_id().items() if slug == model_id), model_id)
 
 
 # ==============================================================================
@@ -524,7 +589,7 @@ def _probe_kernel_llama_8081() -> Optional[Dict[str, Any]]:
     if memo_alias and _mono() - memo_at < _ALIAS_RECHECK_S:
         alias = memo_alias
     else:
-        alias = next(iter(KERNEL_ALIAS_TO_ID))
+        alias = ""
         try:
             with opener.open("http://127.0.0.1:8081/v1/models", timeout=1.5) as m_resp:
                 data = json.loads(m_resp.read().decode("utf-8", errors="replace")).get("data") or []
@@ -533,10 +598,12 @@ def _probe_kernel_llama_8081() -> Optional[Dict[str, Any]]:
                     _ALIAS_MEMO = (_mono(), alias)
         except Exception:
             pass
+    # An alias that is not in the runners file stays unknown ("" model_id): never a guess at
+    # one of the known models, which would make a load of that model look already done.
     return {
-        "model_id": KERNEL_ALIAS_TO_ID.get(alias, KERNEL_LLM_IDS[0]),
+        "model_id": runner_alias_to_id().get(alias, ""),
         "served_alias": alias,
-        "mode_label": f"{alias} · 256K (svc:qwen :8081)",
+        "mode_label": f"{alias or '未知模型'} · 256K (svc:qwen :8081)",
     }
 
 
@@ -623,7 +690,8 @@ def _apply_kernel_8081_probe() -> Optional[Dict[str, Any]]:
         LLM_8081_STATE.update(online=False, alias="", model_id="")
         return None
     LLM_8081_STATE.update(online=True, alias=k8081["served_alias"], model_id=k8081["model_id"])
-    LOADED_MODEL_IDS[:] = [k8081["model_id"]]  # one assignment: a status reader never sees it half-built
+    ident = k8081["model_id"] or k8081["served_alias"]  # a model outside the runners file is listed by alias
+    LOADED_MODEL_IDS[:] = [ident] if ident else []  # one assignment: a status reader never sees it half-built
     return k8081
 
 
@@ -645,6 +713,7 @@ def reset_status_caches() -> None:
     _ALIAS_MEMO = (0.0, "")
     _PROBE_CELL.invalidate()
     _HARDWARE_CELL.invalidate()
+    _RUNNER_ALIAS_MEMO.update(sig=None, map={})
 
 
 def get_llm_8081_status() -> Dict[str, Any]:
@@ -966,7 +1035,7 @@ def _run_kernel_llm_boot(target_id: str, hf_token: str = "") -> Tuple[bool, str]
         return False, f"colab_kernel_runners.json 中未包含 {target_id}"
 
     info = runners[target_id]
-    name = KERNEL_MODEL_NAMES.get(target_id, target_id)
+    name = model_display_name(target_id)
     k8081 = _probe_kernel_llama_8081()
     if k8081 and k8081["model_id"] == target_id:
         _sync_kernel_8081_to_loaded_runtimes()
@@ -1180,6 +1249,17 @@ def get_status() -> Dict[str, Any]:
 def create_app() -> FastAPI:
     app = FastAPI(title="Colab-yoga server", docs_url=None, redoc_url=None, openapi_url=None)
 
+    @app.middleware("http")
+    async def require_token(request, call_next):
+        # The server is reachable from the internet through its gradio.live tunnel, whose
+        # forwarder connects from 127.0.0.1, so a loopback source says nothing about the
+        # caller: there is no exemption by address. The keeper only reads /api/status.
+        if not (request.method == "GET" and request.url.path == "/api/status"):
+            if not _token_ok(request.headers.get("authorization", "")):
+                return JSONResponse({"detail": "unauthorized"}, status_code=401,
+                                    headers={"WWW-Authenticate": "Bearer"})
+        return await call_next(request)
+
     @app.get("/api/status")
     def api_status():
         # A ready dict straight into JSONResponse skips FastAPI's per-field re-encoding.
@@ -1192,7 +1272,9 @@ def create_app() -> FastAPI:
         if req.context_length is not None:
             CONTEXT_LENGTH = _clamp_context_length(req.context_length)
         # A load already in progress keeps running; its progress shows in the status.
-        begin_model_load(req.model_id or KERNEL_LLM_IDS[0], req.hf_token)
+        if not req.model_id.strip():
+            return JSONResponse({"ok": False, "message": "model_id is required"}, status_code=400)
+        begin_model_load(req.model_id.strip(), req.hf_token)
         return get_status()
 
     @app.post("/api/unload_model")
@@ -1261,7 +1343,8 @@ def _publish_tunnel() -> None:
 
 def main() -> None:
     install_console_mirror()
-    print(f"Colab-yoga server {SERVER_VERSION} 启动中 (port {SERVER_PORT})", flush=True)
+    load_api_token()  # before the port opens: no request is ever served without one
+    print(f"Colab-yoga server {SERVER_VERSION} 启动中 (port {SERVER_PORT})，控制接口需要 Bearer 令牌", flush=True)
     # llama-server and the MCP forwarder are deliberately left to run on their own.
     threading.Thread(target=_idle_watchdog_loop, daemon=True).start()
     threading.Thread(target=_publish_tunnel, daemon=True).start()

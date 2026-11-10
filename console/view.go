@@ -134,8 +134,11 @@ func (a *App) nav(c *ui.Context, p Palette) {
 			}
 		})
 		served, _, online := a.servedModel()
-		for i := range catalog {
-			a.modelRow(c, p, &catalog[i], online && served == catalog[i].ID, i)
+		for i := range a.catalog {
+			a.modelRow(c, p, &a.catalog[i], online && served != "" && served == a.catalog[i].ID, i)
+		}
+		if len(a.catalog) == 0 {
+			ui.Text(c.Key("no-models"), noModelsHint).FontSize(12).TextColor(p.Text3).Margin(0, 4, 6, 4)
 		}
 
 		ui.Spacer(c).MinHeight(20)
@@ -214,8 +217,9 @@ func (a *App) modelRow(c *ui.Context, p Palette, m *Model, running bool, i int) 
 		if len(tags) > 2 {
 			tags = tags[:2]
 		}
-		ui.Text(c, strings.TrimPrefix(fmt.Sprintf("%s · %.0f GB", strings.Join(tags, " · "), m.SizeGB), " · ")).
-			FontSize(12).TextColor(p.Text3).SingleLine()
+		if line := modelSummary(tags, m.SizeGB); line != "" {
+			ui.Text(c, line).FontSize(12).TextColor(p.Text3).SingleLine()
+		}
 		if a.switching == m.ID {
 			// A shimmer along the row's foot while its model downloads and loads.
 			ui.Box(c.Key("loading")).Height(2).FillWidth().Margin(4, 0, 0, 0).Transition(rowMotion).
@@ -300,14 +304,14 @@ func (a *App) dialogs(c *ui.Context) {
 		a.release()
 	}
 	curID, cur, _ := a.servedModel()
-	if m := modelByID(curID); m != nil {
+	if m := a.modelByID(curID); m != nil {
 		cur = m.Name
 	}
 	msg := "下载并装载要几分钟。"
 	if cur != "" {
 		msg = "云端正在运行 " + cur + "，切换会先停掉它：网页、Magpie 和 MCP 里正在进行的对话会中断。新模型下载并装载要几分钟。"
 	}
-	if ui.AlertDialog(c, &a.askSwitch, "切换到 "+modelName(a.switchTarget)+"？", msg, "取消", "切换") == 1 {
+	if ui.AlertDialog(c, &a.askSwitch, "切换到 "+a.modelName(a.switchTarget)+"？", msg, "取消", "切换") == 1 {
 		a.switchTo(a.switchTarget)
 	}
 	if ui.AlertDialog(c, &a.askLogout, "退出 Google 账号？",
@@ -315,7 +319,7 @@ func (a *App) dialogs(c *ui.Context) {
 		a.logout()
 	}
 	id, _, _ := a.servedModel()
-	if ui.AlertDialog(c, &a.askUnload, "卸载 "+modelName(id)+"？",
+	if ui.AlertDialog(c, &a.askUnload, "卸载 "+a.modelName(id)+"？",
 		"释放显存，网页对话会断开；GPU 仍在计费，不用了请点「释放」。", "取消", "卸载") == 1 {
 		a.unload(id)
 	}
@@ -451,4 +455,21 @@ func ago(sec int) string {
 		return fmt.Sprintf("%d 分钟前", sec/60)
 	}
 	return fmt.Sprintf("%d 小时前", sec/3600)
+}
+
+// modelLabel is a model's line in the switch menu.
+func modelLabel(m *Model) string {
+	if m.SizeGB <= 0 {
+		return m.Name
+	}
+	return fmt.Sprintf("%s  ·  %.0f GB", m.Name, m.SizeGB)
+}
+
+// modelSummary is the small line under a model's name in the left rail.
+func modelSummary(tags []string, sizeGB float64) string {
+	parts := append([]string{}, tags...)
+	if sizeGB > 0 {
+		parts = append(parts, fmt.Sprintf("%.0f GB", sizeGB))
+	}
+	return strings.Join(parts, " · ")
 }

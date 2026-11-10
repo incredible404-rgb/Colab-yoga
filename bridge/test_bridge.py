@@ -84,6 +84,17 @@ class WakeReuseTests(unittest.TestCase):
         patch(cb, "_allocate_fresh_session", allocate)
         patch(cb, "ContentsClient", contents)
         patch(cb.time, "sleep", lambda *_: None)
+        # Wake stores the control token and starts a keeper: keep both off the real config
+        # dir and the real process table.
+        self.cfg = Path(tempfile.mkdtemp())
+        self.spawned = 0
+        patch(cb, "_colab_yoga_config_dir", lambda: str(self.cfg))
+
+        def spawn():
+            self.spawned += 1
+            return True
+
+        patch(cb, "spawn_keeper", spawn)
         self._out = io.StringIO()
         self._redirect = contextlib.redirect_stdout(self._out)
 
@@ -168,6 +179,7 @@ class WakeReuseTests(unittest.TestCase):
             f.write("# dummy boot code")
 
         uploaded = []
+        token_on_vm = []
 
         class FakeContents:
             def __init__(self, _sess):
@@ -175,6 +187,9 @@ class WakeReuseTests(unittest.TestCase):
 
             def upload(self, local, remote):
                 uploaded.append((local, remote))
+                if remote == "content/colab_yoga_token":
+                    with open(local, encoding="utf-8") as fh:
+                        token_on_vm.append(fh.read())
 
         class FakeRuntime:
             def __init__(self, *args, **kwargs):
@@ -217,6 +232,16 @@ class WakeReuseTests(unittest.TestCase):
         self.assertTrue(any(r == "content/colab_yoga_server.py" for _, r in uploaded))
         # Verify runners upload
         self.assertTrue(any(r == "content/colab_kernel_runners.json" for _, r in uploaded))
+        # The control token goes to the VM as a file, is kept locally, and is never printed.
+        self.assertEqual(len(token_on_vm), 1)
+        token = token_on_vm[0]
+        self.assertGreaterEqual(len(token), 32)
+        self.assertEqual(self.cb.load_server_token(), token)
+        self.assertNotIn(token, out)
+        self.assertFalse(os.path.exists(next(l for l, r in uploaded if r == "content/colab_yoga_token")))
+        # No keeper was running, so wake started one, before the URL line was printed.
+        self.assertEqual(self.spawned, 1)
+        self.assertLess(out.index("已启动后台保活"), out.index("WAKE_URL:"))
 
 
 class KeeperTests(unittest.TestCase):
@@ -538,6 +563,219 @@ class KeeperLoopTests(unittest.TestCase):
 
     def test_kernel_lookup_reuses_one_http_session(self) -> None:
         self.assertIs(cb._http(), cb._http())
+
+
+class EnsureKeeperTests(unittest.TestCase):
+    """The command-line wake has no console to spawn the keeper, so wake does it itself."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self._saved = (cb._colab_yoga_config_dir, cb.subprocess.Popen)
+        cb._colab_yoga_config_dir = lambda: str(self.tmp)
+        self.popen_calls = []
+
+        def popen(cmd, **kwargs):
+            self.popen_calls.append((cmd, kwargs))
+            return types.SimpleNamespace(pid=1)
+
+        cb.subprocess.Popen = popen
+
+    def tearDown(self) -> None:
+        cb._colab_yoga_config_dir, cb.subprocess.Popen = self._saved
+
+    def _write_keeper(self, **st) -> None:
+        (self.tmp / "keeper.json").write_text(json.dumps(st), encoding="utf-8")
+
+    def test_a_live_keeper_is_left_alone(self) -> None:
+        self._write_keeper(pid=os.getpid(), exit_reason="")
+        self.assertEqual(cb.ensure_keeper(), "running")
+        self.assertEqual(self.popen_calls, [])
+
+    def test_no_keeper_dead_pid_or_finished_keeper_starts_one(self) -> None:
+        for st in (None, {"pid": 999999, "exit_reason": ""}, {"pid": os.getpid(), "exit_reason": "idle_release"}):
+            self.popen_calls.clear()
+            if st is None:
+                with contextlib.suppress(FileNotFoundError):
+                    (self.tmp / "keeper.json").unlink()
+            else:
+                self._write_keeper(**st)
+            self.assertEqual(cb.ensure_keeper(), "started", st)
+            self.assertEqual(len(self.popen_calls), 1, st)
+
+    def test_spawn_is_detached_keeper_on_the_bundled_pythonw(self) -> None:
+        install = self.tmp / "app"
+        (install / "runtime").mkdir(parents=True)
+        (install / "bridge").mkdir()
+        (install / "runtime" / "pythonw.exe").write_bytes(b"")
+        fake_file = str(install / "bridge" / "colab_yoga_bridge.py")
+        saved = cb.__file__
+        cb.__file__ = fake_file
+        try:
+            self.assertTrue(cb.spawn_keeper())
+        finally:
+            cb.__file__ = saved
+        cmd, kw = self.popen_calls[0]
+        self.assertEqual(cmd, [str(install / "runtime" / "pythonw.exe"), "-X", "utf8",
+                               os.path.abspath(fake_file), "keeper"])
+        self.assertEqual(kw["cwd"], str(install))
+        self.assertEqual(kw["stdout"], cb.subprocess.DEVNULL)  # must not hold wake's output pipe open
+        self.assertEqual(kw["env"]["PYTHONUTF8"], "1")
+        if sys.platform == "win32":
+            self.assertTrue(kw["creationflags"] & 0x00000008)  # DETACHED_PROCESS
+            self.assertTrue(kw["creationflags"] & 0x08000000)  # CREATE_NO_WINDOW
+
+    def test_spawn_retries_without_breakaway_then_reports_failure(self) -> None:
+        if sys.platform != "win32":
+            self.skipTest("Windows creation flags")
+        flags_seen = []
+
+        def popen(cmd, **kwargs):
+            flags_seen.append(kwargs["creationflags"])
+            raise OSError("refused")
+
+        cb.subprocess.Popen = popen
+        self.assertFalse(cb.spawn_keeper())
+        self.assertEqual(len(flags_seen), 2)
+        self.assertTrue(flags_seen[0] & 0x01000000)
+        self.assertFalse(flags_seen[1] & 0x01000000)
+
+
+class ServerTokenTests(unittest.TestCase):
+    """The control token: stored locally, found again by discover_url, kept out of output."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self._saved = {}
+
+        def patch(obj, name, val):
+            self._saved[(obj, name)] = getattr(obj, name)
+            setattr(obj, name, val)
+
+        sess = types.SimpleNamespace(name="easycolab", endpoint="vm1", token="t", url="u", token_expires_at=None,
+                                     accelerator="G4", kernel_id=None, session_id=None)
+        proxy = types.SimpleNamespace(token="t2", url="u2", expires_at=lambda: None)
+        assign = types.SimpleNamespace(endpoint="vm1", runtime_proxy_info=proxy)
+        self.alive = True
+        self.vm_token = "tok-from-the-vm"
+
+        def exec_on(s, code, timeout=40):
+            body = {"url": "https://x.gradio.live", "app_alive": self.alive, "token": self.vm_token}
+            return [{"text": "EC_DISCOVER:" + json.dumps(body)}]
+
+        patch(cb, "_colab_yoga_config_dir", lambda: str(self.tmp))
+        patch(cb, "_has_valid_token", lambda: True)
+        patch(cb, "_safe_sync_sessions", lambda with_status=False: ({"easycolab": sess}, [assign]))
+        patch(cb, "_exec_on_session", exec_on)
+        patch(cb, "state", types.SimpleNamespace(store=types.SimpleNamespace(add=lambda s: None)))
+
+    def tearDown(self) -> None:
+        for (obj, name), val in self._saved.items():
+            setattr(obj, name, val)
+
+    def _discover(self) -> dict:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cb.cmd_discover_url()
+        if self.vm_token:
+            self.assertNotIn(self.vm_token, out.getvalue())
+        return json.loads(out.getvalue().strip().splitlines()[-1])
+
+    def test_discover_saves_the_token_and_never_prints_it(self) -> None:
+        body = self._discover()
+        self.assertTrue(body["ok"])
+        self.assertTrue(body["token_saved"])
+        self.assertNotIn("token", body)
+        self.assertEqual(cb.load_server_token(), "tok-from-the-vm")
+
+    def test_an_old_server_without_a_token_file_leaves_the_local_one_alone(self) -> None:
+        cb.save_server_token("older")
+        self.vm_token = None
+        body = self._discover()
+        self.assertFalse(body["token_saved"])
+        self.assertEqual(cb.load_server_token(), "older")
+
+    def test_a_dead_server_does_not_overwrite_the_token(self) -> None:
+        cb.save_server_token("older")
+        self.alive = False
+        self.assertFalse(self._discover()["token_saved"])
+        self.assertEqual(cb.load_server_token(), "older")
+
+    def test_discover_code_reads_the_token_file(self) -> None:
+        import ast
+
+        ast.parse(cb._DISCOVER_CODE)
+        self.assertIn("/content/colab_yoga_token", cb._DISCOVER_CODE)
+
+    def test_token_file_round_trip_and_clear(self) -> None:
+        self.assertEqual(cb.load_server_token(), "")
+        cb.save_server_token("abc")
+        self.assertEqual(cb.load_server_token(), "abc")
+        self.assertEqual(Path(cb.server_token_path()).parent, self.tmp)
+        cb.clear_server_token()
+        self.assertEqual(cb.load_server_token(), "")
+        cb.clear_server_token()  # already gone: no error
+
+
+class AuthCodeSessionStoreTests(unittest.TestCase):
+    """Re-authorising must not orphan the named sessions colab-gpu-llm-service is using."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self._saved = {}
+
+        def patch(obj, name, val):
+            self._saved[(obj, name)] = getattr(obj, name)
+            setattr(obj, name, val)
+
+        self.emails = []  # what _get_account_email answers: before the bind, then after it
+        self.cleared = 0
+        creds = types.SimpleNamespace(to_json=lambda: "{}")
+
+        class FakeFlow:
+            credentials = creds
+
+            def fetch_token(self, code):
+                pass
+
+        flow_cls = types.SimpleNamespace(from_client_config=lambda *a, **k: FakeFlow())
+
+        def clear():
+            self.cleared += 1
+
+        patch(cb, "_load_client_config", lambda: {})
+        patch(cb, "InstalledAppFlow", flow_cls)
+        patch(cb, "TOKEN_CONFIG_PATH", str(self.tmp / "token.json"))
+        patch(cb, "PKCE_VERIFIER_PATH", str(self.tmp / "pkce.txt"))
+        patch(cb, "ACCOUNT_PROFILE_CACHE_PATH", str(self.tmp / "profile.json"))
+        patch(cb, "_get_account_email", lambda: self.emails.pop(0))
+        patch(cb, "_clear_local_session_store", clear)
+        patch(cb, "cmd_auth_status", lambda: None)
+        patch(cb, "state", types.SimpleNamespace(_client="c", _sessions="s"))
+
+    def tearDown(self) -> None:
+        for (obj, name), val in self._saved.items():
+            setattr(obj, name, val)
+
+    def _bind(self, old: str, new: str) -> None:
+        self.emails = [old, new]
+        with contextlib.redirect_stdout(io.StringIO()):
+            cb.cmd_auth_code("the-code")
+        self.assertTrue((self.tmp / "token.json").exists())  # the new token is saved either way
+
+    def test_same_account_keeps_the_named_sessions(self) -> None:
+        self._bind("me@example.com", "Me@Example.com")
+        self.assertEqual(self.cleared, 0)
+        self.assertIsNone(cb.state._client)  # but the client is rebuilt from the new token
+
+    def test_a_different_account_clears_them(self) -> None:
+        self._bind("me@example.com", "other@example.com")
+        self.assertEqual(self.cleared, 1)
+
+    def test_when_either_account_cannot_be_told_they_are_cleared(self) -> None:
+        self._bind("", "me@example.com")  # first bind, or the old token was dead
+        self.assertEqual(self.cleared, 1)
+        self._bind("me@example.com", "")
+        self.assertEqual(self.cleared, 2)
 
 
 if __name__ == "__main__":

@@ -7,16 +7,22 @@ Derived from EasyColab's colab_bridge.py (original author wy51ai, Apache 2.0).
 Supports subcommands:
   - auth_status  : Check OAuth login state, CU balance, hourly burn rate, and active VMs
   - auth_url     : Generate Google OAuth2 authorization URL
-  - auth_code    : Exchange Google authorization code and save token
+  - auth_code    : Exchange Google authorization code and save token (the local Colab session
+                   records are cleared only when the code belongs to a different account)
   - auth_logout  : Disconnect and clear local tokens and sessions
-  - wake         : Provision/reuse Colab GPU VM, upload colab_yoga_server.py & runners, run vm_boot.py
+  - wake         : Provision/reuse Colab GPU VM, upload colab_yoga_server.py, the runners and a
+                   fresh control token, run vm_boot.py, then make sure a keeper is running
   - stop_all     : Terminate and unassign all active Colab VMs on account
-  - discover_url : Read running server tunnel URL from VM log without redeploying
+  - discover_url : Read the running server's tunnel URL and control token from the VM without
+                   redeploying
   - keeper       : Detached heartbeat daemon that keeps the Colab runtime alive while active
 """
 import os
 import re
+import secrets
+import subprocess
 import sys
+import tempfile
 import json
 import time
 import threading
@@ -184,7 +190,21 @@ def cmd_auth_url():
     print(json.dumps({"ok": True, "auth_url": auth_url}))
 
 
+def _same_account(old_email: str, new_email: str) -> bool:
+    return bool(old_email) and bool(new_email) and old_email.strip().casefold() == new_email.strip().casefold()
+
+
+def _reset_state_cache():
+    state._client = None
+    state._sessions = None
+
+
 def cmd_auth_code(code: str):
+    """Exchange the code and save the token. The named Colab sessions in sessions.json are
+    shared with colab-gpu-llm-service and point at live runtimes, so they are cleared only
+    when the code belongs to a different account than the one bound before; authorising the
+    same account again keeps them."""
+    global _CHECKED_CREDS
     try:
         client_config = _load_client_config()
         flow = InstalledAppFlow.from_client_config(client_config, PUBLIC_SCOPES)
@@ -194,7 +214,7 @@ def cmd_auth_code(code: str):
                 flow.code_verifier = f.read().strip()
         flow.fetch_token(code=code.strip())
         creds = flow.credentials
-        _clear_local_session_store()
+        old_email = _get_account_email()  # the token file still holds the previous account
         for p in (ACCOUNT_PROFILE_CACHE_PATH, PKCE_VERIFIER_PATH):
             if os.path.exists(p):
                 try:
@@ -204,6 +224,12 @@ def cmd_auth_code(code: str):
         os.makedirs(os.path.dirname(TOKEN_CONFIG_PATH), exist_ok=True)
         with open(TOKEN_CONFIG_PATH, "w", encoding="utf-8") as f:
             f.write(creds.to_json())
+        _CHECKED_CREDS = None
+        new_email = _get_account_email()
+        if _same_account(old_email, new_email):
+            _reset_state_cache()
+        else:  # another account, or one of the two could not be told: stale records must go
+            _clear_local_session_store()
         return cmd_auth_status()
     except Exception as e:
         print(json.dumps({"ok": False, "logged_in": False, "error": str(e)}))
@@ -332,6 +358,7 @@ def cmd_stop_all():
                 pass
 
         stop_keeper()
+        clear_server_token()
 
         try:
             import glob
@@ -481,6 +508,46 @@ def resolve_runners_path() -> str | None:
     return None
 
 
+SERVER_TOKEN_REMOTE = "content/colab_yoga_token"
+
+
+def _upload_server_token(contents, token: str) -> None:
+    """Put the token on the VM as /content/colab_yoga_token (the server reads it at start).
+    Goes through a private temp file that is removed right after."""
+    fd, tmp = tempfile.mkstemp(prefix="colab-yoga-tok-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(token)
+        for attempt in range(4):
+            try:
+                contents.upload(tmp, SERVER_TOKEN_REMOTE)
+                return
+            except Exception:
+                if attempt == 3:
+                    raise
+                time.sleep(2.5)
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+def _on_wake_url(token: str) -> None:
+    """The server is up. Before the URL line reaches the console or an agent: store the
+    token it needs for POST calls, and make sure a keeper is keeping the runtime alive (the
+    command line alone has no console to spawn one)."""
+    try:
+        save_server_token(token)
+    except Exception as e:
+        print(f"WAKE_LOG: ⚠️ 本机保存控制令牌失败：{type(e).__name__}", flush=True)
+    result = ensure_keeper()
+    if result == "failed":
+        print("WAKE_LOG: ⚠️ 后台保活没能启动：请手动运行 colab_yoga_bridge.py keeper，否则实例约 21-35 分钟后会被回收。", flush=True)
+    elif result == "started":
+        print("WAKE_LOG: 已启动后台保活（独立进程，关掉这个命令也不会中断）", flush=True)
+
+
 def cmd_wake(gpu_type: str = "G4", server_py_path: str = None, app_py_path: str = None):
     """
     Wake/reuse Colab GPU VM, upload colab_yoga_server.py & runners, execute vm_boot.py.
@@ -582,6 +649,13 @@ def cmd_wake(gpu_type: str = "G4", server_py_path: str = None, app_py_path: str 
             except Exception:
                 pass
 
+        # A fresh bearer for the server's control API, delivered as a file the server reads
+        # at start. Never printed, never put in the code sent to the kernel (the runtime
+        # keeps a history of that) or in the URL line.
+        api_token = secrets.token_urlsafe(32)
+        print("WAKE_LOG: 正在下发控制接口令牌...", flush=True)
+        _upload_server_token(contents, api_token)
+
         vm_boot_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "..", "server", "vm_boot.py"
         )
@@ -608,6 +682,8 @@ def cmd_wake(gpu_type: str = "G4", server_py_path: str = None, app_py_path: str 
             if isinstance(out, dict):
                 if "text" in out:
                     for line in str(out["text"]).splitlines():
+                        if line.startswith("WAKE_URL:"):
+                            _on_wake_url(api_token)
                         print(line, flush=True)
                 elif out.get("output_type") == "error":
                     print("WAKE_ERROR: " + str(out.get("evalue", "Execution error")), flush=True)
@@ -659,7 +735,10 @@ if os.path.exists('/content/colab_yoga_server.log'):
     if _m:
         _u = _m[-1].strip()
 _alive = subprocess.run(['pgrep', '-f', 'python.*/content/colab_yoga_server.py'], capture_output=True).returncode == 0
-print('EC_DISCOVER:' + json.dumps({'url': _u, 'app_alive': _alive}))
+_t = None
+if os.path.exists('/content/colab_yoga_token'):
+    _t = open('/content/colab_yoga_token', errors='replace').read().strip() or None
+print('EC_DISCOVER:' + json.dumps({'url': _u, 'app_alive': _alive, 'token': _t}))
 """
 
 
@@ -708,7 +787,17 @@ def cmd_discover_url():
         if found is None:
             print(json.dumps({"ok": False, "error": "no discover output", "active_assignments": len(assignments)}))
             return
-        found.update(ok=True, active_assignments=len(assignments), accelerator=s.accelerator)
+        # The token stays out of the printed answer: it goes to the local token file.
+        token = found.pop("token", None)
+        token_saved = False
+        if token and found.get("app_alive"):
+            try:
+                save_server_token(str(token))
+                token_saved = True
+            except Exception:
+                pass
+        found.update(ok=True, active_assignments=len(assignments), accelerator=s.accelerator,
+                     token_saved=token_saved)
         print(json.dumps(found))
     except Exception as e:
         print(json.dumps({"ok": False, "error": str(e)}))
@@ -748,6 +837,35 @@ def _colab_yoga_config_dir() -> str:
 
 def keeper_state_path() -> str:
     return os.path.join(_colab_yoga_config_dir(), "keeper.json")
+
+
+def server_token_path() -> str:
+    return os.path.join(_colab_yoga_config_dir(), "server_token.json")
+
+
+def save_server_token(token: str) -> None:
+    """The server's control token, for this PC's console and for agents that POST to its
+    API. Lives in the per-user config dir, never in the repo or a package."""
+    path = server_token_path()
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"token": token, "saved": time.time()}, f)
+    os.replace(tmp, path)
+
+
+def load_server_token() -> str:
+    try:
+        with open(server_token_path(), "r", encoding="utf-8") as f:
+            return str(json.load(f).get("token") or "")
+    except Exception:
+        return ""
+
+
+def clear_server_token() -> None:
+    try:
+        os.remove(server_token_path())
+    except OSError:
+        pass
 
 
 def _pid_alive(pid: int) -> bool:
@@ -964,6 +1082,52 @@ def cmd_keeper():
         st["ended"] = time.time()
         st["exit_reason"] = st.get("exit_reason") or "loop_ended"
         _keeper_save(st)
+
+
+def _keeper_python() -> str:
+    """pythonw.exe of the bundled runtime (no console window), else the interpreter in use."""
+    install_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for cand in (
+        os.path.join(install_dir, "runtime", "pythonw.exe"),
+        os.path.join(os.path.dirname(sys.executable), "pythonw.exe"),
+    ):
+        if os.path.isfile(cand):
+            return cand
+    return sys.executable
+
+
+def spawn_keeper() -> bool:
+    """Start `keeper` as a detached process that outlives this one, the way the console's
+    SpawnKeeper does: <app>/runtime/pythonw.exe -X utf8 <bridge> keeper, own process group,
+    no window, outside this process's job when Windows allows."""
+    bridge = os.path.abspath(__file__)
+    install_dir = os.path.dirname(os.path.dirname(bridge))
+    cmd = [_keeper_python(), "-X", "utf8", bridge, "keeper"]
+    env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+    kwargs = dict(cwd=install_dir, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                  stderr=subprocess.DEVNULL, close_fds=True)
+    if sys.platform == "win32":
+        base = 0x00000008 | 0x00000200 | 0x08000000  # DETACHED_PROCESS | NEW_PROCESS_GROUP | NO_WINDOW
+        for flags in (base | 0x01000000, base):  # CREATE_BREAKAWAY_FROM_JOB is refused inside some jobs
+            try:
+                subprocess.Popen(cmd, creationflags=flags, **kwargs)
+                return True
+            except OSError:
+                continue
+        return False
+    try:
+        subprocess.Popen(cmd, start_new_session=True, **kwargs)
+        return True
+    except OSError:
+        return False
+
+
+def ensure_keeper() -> str:
+    """'running' when a live keeper already exists (keeper.json, judged like the console's
+    readKeeper: no exit_reason and the pid alive), else 'started' or 'failed'."""
+    if keeper_status().get("alive"):
+        return "running"
+    return "started" if spawn_keeper() else "failed"
 
 
 def stop_keeper() -> None:

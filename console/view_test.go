@@ -16,7 +16,9 @@ import (
 func fakeApp(t *testing.T) *App {
 	t.Helper()
 	dir := t.TempDir()
-	p := Paths{ConfigDir: dir, Settings: filepath.Join(dir, "settings.json"), Keeper: filepath.Join(dir, "keeper.json")}
+	runners := writeRunners(t, dir, shippedRunners)
+	p := Paths{ConfigDir: dir, Settings: filepath.Join(dir, "settings.json"), Keeper: filepath.Join(dir, "keeper.json"),
+		Token: filepath.Join(dir, "server_token.json"), Runners: []string{runners}}
 	a := newApp(p)
 	a.disableBackground = true
 	a.tsURL = "http://qwen.example.ts.net:443"
@@ -323,6 +325,14 @@ func TestSnapshots(t *testing.T) {
 		{"loading_dark_1440", 1440, 900, func(a *App) {
 			a.switching = "qwen38-huihui-v2"
 			a.status.IsLoading, a.status.TaskProgress, a.status.TaskMessage = true, 0.46, "并发下载进度: 46% (49.1 / 107.1 GiB)，均速 3135 MB/s"
+		}},
+		{"nomodels_dark_1440", 1440, 900, func(a *App) {
+			a.catalog = nil
+			a.status.LLM.Online = false
+		}},
+		{"custom_model_dark_1440", 1440, 900, func(a *App) {
+			a.catalog = append(a.catalog, Model{ID: "my-70b", Name: "My-70B-Instruct-Q5_K_M", Alias: "My-70B-Instruct-Q5_K_M", SizeGB: 41.5})
+			a.status.LLM.Alias, a.status.LLM.ModelID = "My-70B-Instruct-Q5_K_M", ""
 		}},
 		{"offline_light_1440", 1440, 900, func(a *App) {
 			a.themeName = "light"

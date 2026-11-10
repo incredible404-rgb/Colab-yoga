@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -8,44 +9,6 @@ import (
 
 	"github.com/egoist/mygo"
 )
-
-// Model is a colab_kernel LLM the console can run on :8081. Keep in step with
-// colab-gpu-llm-service's MODELS (colab_kernel.py) and server/colab_yoga_server.py.
-type Model struct {
-	ID, Name, Alias string
-	SizeGB          float64
-	Tags            []string
-	Note            string
-}
-
-var catalog = []Model{
-	{"qwen38-huihui-v2", "Qwen3.8-Flash-Next (Huihui v2)", "Huihui-Qwen3.8-Flash-Next-abliterated-v2-UD-Q4_K_XL",
-		115.0, []string{"125B-A6B MoE", "UD-Q4_K_XL", "视觉", "MTP"}, "默认主力 · 104 tok/s"},
-	{"gemma4-31b", "Gemma-4-31B (ARA Heretic Q8_0)", "Gemma-4-31B-it-ARA-Heretic-Q8_0",
-		34.8, []string{"31B 稠密", "Q8_0", "视觉", "MTP"}, "约 1/3 显存，加载最快"},
-	{"qwen38-27b-rvn", "Qwen3.8-27B (RVN Heretic BF16)", "Qwen3.8-27B-RVN-Heretic-BF16",
-		56.1, []string{"27B 稠密", "BF16", "视觉", "MTP"}, "原精度双重 ARA 破限"},
-	{"glm53-flash", "GLM-5.3-Flash (320B-A18B)", "GLM-5.3-Flash-Uncensored-GSQ-RCO-Q4",
-		138.2, []string{"320B-A18B MoE", "GSQ-RCO-Q4", "视觉", "部分专家放内存"}, "最大的一个"},
-}
-
-func modelByID(id string) *Model {
-	for i := range catalog {
-		if catalog[i].ID == id {
-			return &catalog[i]
-		}
-	}
-	return nil
-}
-
-func modelByAlias(alias string) *Model {
-	for i := range catalog {
-		if catalog[i].Alias == alias {
-			return &catalog[i]
-		}
-	}
-	return nil
-}
 
 // Account is what colab_bridge auth_status reports (official Colab ledger).
 type Account struct {
@@ -75,6 +38,8 @@ type App struct {
 
 	// persisted (settings.json)
 	serverURL, tsURL, mcpURL, novelRoot string
+	catalog                             []Model // from colab_kernel_runners.json
+	catalogSig                          runnersSig
 	gpu                                 string
 	idleMin                             int
 	themeName                           string // "dark" | "light"
@@ -111,6 +76,7 @@ type App struct {
 	switchTarget      string
 	binding           bool   // waiting for the Google authorization code
 	authCode          string // pasted code; cleared right after use, never logged
+	tokenStale        bool   // a control call was refused; the next discover refreshes the token
 	authBusy          bool
 	askLogout         bool
 	toast             string
@@ -124,14 +90,12 @@ type App struct {
 }
 
 func newApp(p Paths) *App {
-	a := &App{paths: p, set: &Settings{path: p.Settings}, server: newServer(), bridge: &Bridge{p: p},
+	a := &App{paths: p, set: &Settings{path: p.Settings}, server: newServer(p.Token), bridge: &Bridge{p: p},
 		page: "dashboard", navWidth: 280, now: time.Now}
 	m := a.set.Load()
 	a.serverURL = str(m, "colabServerURL", "")
 	a.tsURL = str(m, "accessTailscaleURL", "")
-	if a.tsURL == "" {
-		a.tsURL = defaultTailscaleURL(p)
-	}
+	a.reloadCatalog() // also fills an empty access address from the runners
 	a.mcpURL = str(m, "accessMcpURL", "http://127.0.0.1:3426")
 	a.novelRoot = str(m, "accessNovelRoot", "")
 	if a.novelRoot == "" {
@@ -306,9 +270,9 @@ func (a *App) applyStatus(st *Status) {
 		id := a.switching
 		a.switching = ""
 		if st.LLM != nil && st.LLM.Online && st.LLM.ModelID == id {
-			a.flash(modelName(id) + " 已就绪")
+			a.flash(a.modelName(id) + " 已就绪")
 		} else {
-			a.notify(modelName(id)+" 加载失败", st.TaskMessage)
+			a.notify(a.modelName(id)+" 加载失败", st.TaskMessage)
 		}
 	}
 	a.warnIdle()
@@ -474,7 +438,10 @@ func (a *App) refreshAccess() {
 	a.apply(func() { ts, mcp = a.tsURL, a.mcpURL; close(done) })
 	<-done
 	acc := probeAccess(ts, mcp)
-	a.apply(func() { a.access = acc })
+	a.apply(func() {
+		a.access = acc
+		a.reloadCatalog() // a runners file exported while the console runs shows up here
+	})
 }
 
 func (a *App) ensureKeeper() {
@@ -549,6 +516,11 @@ func (a *App) discover(manual bool) {
 			}
 			u, _ := m["url"].(string)
 			alive, _ := m["app_alive"].(bool)
+			if saved, _ := m["token_saved"].(bool); saved && a.tokenStale {
+				a.tokenStale = false
+				a.flash("已从云端重新取得控制令牌，请再点一次刚才的操作")
+				return
+			}
 			switch {
 			case u != "" && alive && (u != a.serverURL || !a.connected):
 				a.setServerURL(u, false)
@@ -562,6 +534,15 @@ func (a *App) discover(manual bool) {
 	})
 }
 
+// noteAuth reacts to a refused control call: the token this PC holds is not the one the
+// running server uses (it was redeployed from elsewhere), so fetch the current one.
+func (a *App) noteAuth(err error) {
+	if errors.Is(err, errUnauthorized) {
+		a.tokenStale = true
+		a.discover(false)
+	}
+}
+
 func (a *App) touch() {
 	url := a.serverURL
 	if url == "" || !a.connected {
@@ -572,6 +553,7 @@ func (a *App) touch() {
 		a.apply(func() {
 			if err != nil {
 				a.flash("续时失败：" + shortErr(err))
+				a.noteAuth(err)
 				return
 			}
 			a.applyStatus(st)
@@ -602,7 +584,7 @@ func (a *App) switchTo(id string) {
 		return
 	}
 	a.switching = id
-	a.flash("正在切换到 " + modelName(id) + "，下载并装载要几分钟")
+	a.flash("正在切换到 " + a.modelName(id) + "，下载并装载要几分钟")
 	ctx := a.ctxK * 1024
 	hf := a.hfToken
 	a.once("switch", func() {
@@ -612,7 +594,8 @@ func (a *App) switchTo(id string) {
 		a.apply(func() {
 			if err != nil {
 				a.switching = ""
-				a.notify(modelName(id)+" 加载失败", shortErr(err))
+				a.notify(a.modelName(id)+" 加载失败", shortErr(err))
+				a.noteAuth(err)
 				return
 			}
 			_ = a.set.Set(map[string]any{"selectedModelID": id})
@@ -631,10 +614,11 @@ func (a *App) unload(id string) {
 		a.apply(func() {
 			if err != nil {
 				a.flash("卸载失败：" + shortErr(err))
+				a.noteAuth(err)
 				return
 			}
 			a.applyStatus(st)
-			a.flash("已卸载 " + modelName(id))
+			a.flash("已卸载 " + a.modelName(id))
 		})
 	})
 }
@@ -651,6 +635,9 @@ func (a *App) setIdle(mins int) {
 		a.apply(func() {
 			if err == nil {
 				a.applyStatus(st)
+			} else {
+				a.flash("改自动释放时间失败：" + shortErr(err))
+				a.noteAuth(err)
 			}
 		})
 	})
@@ -731,28 +718,22 @@ func (a *App) saveAccessURLs() {
 
 // ─── Derived values for the view ──────────────────────────────────────────────
 
-func modelName(id string) string {
-	if m := modelByID(id); m != nil {
-		return m.Name
-	}
-	return id
-}
-
 // servedModel is what llama-server :8081 runs now: from the server's status, else the
-// tailnet probe.
+// tailnet probe. The alias llama-server reports is the ground truth; an id the server
+// guessed for an alias this console's list does not know (an older server did) is dropped.
 func (a *App) servedModel() (id, alias string, online bool) {
 	if s := a.status; s != nil && s.LLM != nil && s.LLM.Online && a.connected {
 		alias, id = s.LLM.Alias, s.LLM.ModelID
-		if id == "" {
-			if m := modelByAlias(alias); m != nil {
-				id = m.ID
-			}
+		if m := a.modelByAlias(alias); m != nil {
+			id = m.ID
+		} else if m := a.modelByID(id); m != nil && m.Alias != "" && alias != "" {
+			id = ""
 		}
 		return id, alias, true
 	}
 	if a.access.Llama.OK {
 		alias = a.access.Llama.Alias
-		if m := modelByAlias(alias); m != nil {
+		if m := a.modelByAlias(alias); m != nil {
 			id = m.ID
 		}
 		return id, alias, true

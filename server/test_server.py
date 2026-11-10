@@ -36,6 +36,15 @@ CONTRACT_LLM_FIELDS = {
 CONTRACT_MCP_FIELDS = {"listening", "owner", "reachable", "error", "checked_age_s"}
 
 HUIHUI_ALIAS = "Huihui-Qwen3.8-Flash-Next-abliterated-v2-UD-Q4_K_XL"
+TEST_TOKEN = "test-token-0123456789"
+# the models of a typical runners file: slug -> the alias llama-server reports
+SHIPPED_ALIASES = {
+    "qwen38-huihui-v2": HUIHUI_ALIAS,
+    "gemma4-31b": "Gemma-4-31B-it-ARA-Heretic-Q8_0",
+    "qwen38-27b-rvn": "Qwen3.8-27B-RVN-Heretic-BF16",
+    "glm53-flash": "GLM-5.3-Flash-Uncensored-GSQ-RCO-Q4",
+}
+ALIAS_TO_SLUG = {alias: slug for slug, alias in SHIPPED_ALIASES.items()}
 HARDWARE = {
     "gpu_name": "NVIDIA RTX PRO 6000 Blackwell", "vram_used_gb": 1.5, "vram_total_gb": 95.6,
     "cu_burn_rate_per_hour": 10.05, "ram_used_gb": 10.0, "ram_total_gb": 176.0,
@@ -317,6 +326,13 @@ class BoundStatusTestCase(unittest.TestCase):
     def setUp(self):
         reset_slot_state()
         srv.reset_status_caches()
+        runners_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(runners_dir.cleanup)
+        self.models_path = os.path.join(runners_dir.name, "colab_kernel_runners.json")
+        self.write_models(SHIPPED_ALIASES)
+        p = mock.patch.object(srv, "RUNNERS_FILE", self.models_path)
+        p.start()
+        self.addCleanup(p.stop)
         srv.LOADED_MODEL_IDS.clear()
         srv.TASK_STATE.update(is_downloading=False, is_loading_vram=False, progress=0.0, message="")
         srv.IDLE_TIMEOUT_MINUTES = 30
@@ -333,12 +349,22 @@ class BoundStatusTestCase(unittest.TestCase):
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
-        self.client = TestClient(srv.create_app())
+        srv.API_TOKEN = TEST_TOKEN
+        self.addCleanup(setattr, srv, "API_TOKEN", "")
+        self.client = TestClient(srv.create_app(), headers={"Authorization": "Bearer " + TEST_TOKEN})
+
+    def write_models(self, aliases):
+        """The runners file with one runner per slug -> alias (no scripts worth running)."""
+        runners = {slug: {"slug": slug, "alias": alias, "root_dir": "/tmp/" + slug, "code": "pass"}
+                   for slug, alias in aliases.items()}
+        with open(self.models_path, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(runners, f)
+        srv.reset_status_caches()
 
     def fake_probe(self):
         if self.probe_alias is None:
             return None
-        return {"model_id": srv.KERNEL_ALIAS_TO_ID[self.probe_alias], "served_alias": self.probe_alias,
+        return {"model_id": ALIAS_TO_SLUG.get(self.probe_alias, ""), "served_alias": self.probe_alias,
                 "mode_label": self.probe_alias + " · 256K"}
 
 
@@ -1282,6 +1308,191 @@ class VmBootWaitTest(unittest.TestCase):
         out = self.run_wait(proc, wait_seconds=5)
         self.assertIn("WAKE_ERROR", out)
         self.assertEqual(sizes[:4], [1001, 0, 0, 0])
+
+
+class ApiTokenTest(BoundStatusTestCase):
+    """The control API is reachable from the internet through the tunnel: every call but
+    GET /api/status needs the bearer token."""
+
+    MUTATING = (
+        ("post", "/api/touch", {}),
+        ("post", "/api/config_idle", {"idle_timeout_minutes": 0}),
+        ("post", "/api/load_model", {"model_id": "gemma4-31b"}),
+        ("post", "/api/unload_model", {"model_id": ""}),
+        ("post", "/api/disconnect", {}),
+    )
+
+    def bare(self):
+        return TestClient(srv.create_app())  # no Authorization header
+
+    def test_status_is_open_and_everything_else_is_closed_without_a_token(self):
+        c = self.bare()
+        self.assertEqual(c.get("/api/status").status_code, 200)
+        self.assertEqual(c.get("/api/status?model_id=x").status_code, 200)
+        with mock.patch.object(srv, "begin_model_load") as load, \
+                mock.patch.object(srv, "disconnect_colab_runtime") as disc, \
+                mock.patch.object(srv, "unload_model") as unload:
+            for method, path, body in self.MUTATING:
+                r = getattr(c, method)(path, json=body)
+                self.assertEqual(r.status_code, 401, path)
+                self.assertEqual(r.headers.get("www-authenticate"), "Bearer")
+            load.assert_not_called()
+            disc.assert_not_called()
+            unload.assert_not_called()
+        self.assertEqual(srv.IDLE_TIMEOUT_MINUTES, 30)  # config_idle 0 did not take effect
+        self.assertEqual(c.get("/api/nothing").status_code, 401)
+        self.assertEqual(c.post("/api/status", json={}).status_code, 401)
+
+    def test_wrong_malformed_or_stale_tokens_are_refused(self):
+        c = self.bare()
+        for header in ("Bearer nope", "Bearer", "Basic " + TEST_TOKEN, TEST_TOKEN, "Bearer " + TEST_TOKEN + "x",
+                       "bearer  "):
+            r = c.post("/api/touch", json={}, headers={"Authorization": header})
+            self.assertEqual(r.status_code, 401, header)
+
+    def test_the_token_opens_every_call(self):
+        c = self.bare()
+        h = {"Authorization": "Bearer " + TEST_TOKEN}
+        self.assertEqual(c.post("/api/touch", json={}, headers=h).status_code, 200)
+        self.assertEqual(c.post("/api/config_idle", json={"idle_timeout_minutes": 45}, headers=h).json()
+                         ["idle_timeout_minutes"], 45)
+        with mock.patch.object(srv, "disconnect_colab_runtime", return_value=(True, "bye")):
+            self.assertEqual(c.post("/api/disconnect", json={}, headers=h).json(), {"ok": True, "message": "bye"})
+        # the scheme name is case-insensitive
+        self.assertEqual(c.post("/api/touch", json={}, headers={"Authorization": "bearer " + TEST_TOKEN}).status_code, 200)
+
+    def test_no_token_configured_means_closed_not_open(self):
+        srv.API_TOKEN = ""
+        c = self.bare()
+        self.assertEqual(c.get("/api/status").status_code, 200)
+        self.assertEqual(c.post("/api/touch", json={}, headers={"Authorization": "Bearer "}).status_code, 401)
+        self.assertEqual(c.post("/api/touch", json={}).status_code, 401)
+
+    def test_a_loopback_source_is_not_trusted(self):
+        # The tunnel's forwarder connects from 127.0.0.1, so the source address proves nothing.
+        c = TestClient(srv.create_app(), client=("127.0.0.1", 50000))
+        self.assertEqual(c.post("/api/disconnect", json={}).status_code, 401)
+
+    def test_the_token_never_reaches_status_or_the_console_buffer(self):
+        body = json.dumps(self.client.get("/api/status").json())
+        self.assertNotIn(TEST_TOKEN, body)
+        self.client.post("/api/touch", json={})
+        self.assertFalse(any(TEST_TOKEN in line for line in srv.get_console_lines()))
+
+
+class LoadApiTokenTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = os.path.join(self.tmp.name, "colab_yoga_token")
+        for p in (mock.patch.object(srv, "API_TOKEN_FILE", self.path),
+                  mock.patch.dict(os.environ, {}, clear=False)):
+            p.start()
+            self.addCleanup(p.stop)
+        os.environ.pop("COLAB_YOGA_TOKEN", None)
+        self.addCleanup(setattr, srv, "API_TOKEN", "")
+
+    def test_reads_the_file_the_wake_uploaded(self):
+        with open(self.path, "w", encoding="utf-8", newline="") as f:
+            f.write("from-wake\n")
+        self.assertEqual(srv.load_api_token(), "from-wake")
+        self.assertEqual(srv.API_TOKEN, "from-wake")
+
+    def test_environment_wins_over_the_file(self):
+        with open(self.path, "w", encoding="utf-8", newline="") as f:
+            f.write("from-file")
+        with mock.patch.dict(os.environ, {"COLAB_YOGA_TOKEN": " from-env "}):
+            self.assertEqual(srv.load_api_token(), "from-env")
+
+    def test_makes_and_stores_one_when_none_was_given(self):
+        token = srv.load_api_token()
+        self.assertGreaterEqual(len(token), 32)
+        with open(self.path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), token)  # discover_url finds it here
+        self.assertEqual(srv.load_api_token(), token)  # and a restart keeps it
+
+    def test_main_loads_the_token_before_serving(self):
+        order = []
+        with mock.patch.object(srv, "load_api_token", side_effect=lambda: order.append("token")), \
+                mock.patch.object(srv, "install_console_mirror"), \
+                mock.patch.object(srv.threading, "Thread"), \
+                mock.patch.dict(sys.modules, {"uvicorn": mock.Mock(run=lambda *a, **k: order.append("serve"))}):
+            srv.main()
+        self.assertEqual(order, ["token", "serve"])
+
+
+class RunnerRegistryTest(BoundStatusTestCase):
+    """The model list is the runners file; an unknown alias is never guessed into a model."""
+
+    def probe(self, alias):
+        opener = FakeOpener({"/health": {}, "/v1/models": {"data": [{"id": alias}]}})
+        with mock.patch.object(srv, "_local_opener", return_value=opener):
+            return _REAL_PROBE()
+
+    def test_aliases_come_from_the_file(self):
+        self.assertEqual(srv.runner_alias_to_id(), ALIAS_TO_SLUG)
+        for slug, alias in SHIPPED_ALIASES.items():
+            self.assertEqual(self.probe(alias)["model_id"], slug)
+            srv.reset_status_caches()
+
+    def test_a_model_the_user_added_is_found_by_its_alias(self):
+        self.write_models({**SHIPPED_ALIASES, "my-70b": "My-70B-Q5"})
+        got = self.probe("My-70B-Q5")
+        self.assertEqual((got["model_id"], got["served_alias"]), ("my-70b", "My-70B-Q5"))
+        self.assertEqual(srv.model_display_name("my-70b"), "My-70B-Q5")  # no curated name: alias
+        self.assertEqual(srv.model_display_name("gemma4-31b"), "Gemma-4-31B (ARA Heretic Q8_0)")
+
+    def test_an_unknown_alias_is_not_guessed_and_not_taken_for_running(self):
+        got = self.probe("Totally-Other-Model")
+        self.assertEqual((got["model_id"], got["served_alias"]), ("", "Totally-Other-Model"))
+        self.assertIn("Totally-Other-Model", got["mode_label"])
+
+    def test_unknown_alias_in_status_shows_the_alias_and_no_known_model(self):
+        self.probe_alias = "Totally-Other-Model"
+        body = self.client.get("/api/status").json()
+        self.assertEqual(body["llm_server"]["model_id"], "")
+        self.assertEqual(body["llm_server"]["alias"], "Totally-Other-Model")
+        self.assertEqual(body["loaded_model_ids"], ["Totally-Other-Model"])
+        for slug in SHIPPED_ALIASES:
+            self.assertNotIn(slug, body["loaded_model_ids"])
+
+    def test_loading_a_known_model_is_not_skipped_because_an_unknown_one_runs(self):
+        self.probe_alias = "Totally-Other-Model"
+        with mock.patch.object(srv, "_ensure_mcp_bridge"), mock.patch.object(srv, "_kill_llama_8081") as kill, \
+                mock.patch.object(srv.time, "sleep"), \
+                mock.patch.object(srv, "_sync_kernel_8081_to_loaded_runtimes", return_value=None):
+            ok, msg = srv._run_kernel_llm_boot("qwen38-huihui-v2")
+        self.assertNotIn("已在 :8081 运行", msg)
+        kill.assert_called_once()  # the unknown model was replaced, not mistaken for the target
+
+    def test_no_runners_file_means_no_known_models(self):
+        os.remove(self.models_path)
+        srv.reset_status_caches()
+        self.assertEqual(srv.runner_alias_to_id(), {})
+        self.assertEqual(self.probe(HUIHUI_ALIAS)["model_id"], "")
+
+    def test_unreadable_or_odd_runners_files_do_not_raise(self):
+        cases = (("not json", {}), ("[]", {}), ('{"a": 1, "b": {"alias": 7}, "c": {"alias": ""}}', {"7": "b"}))
+        for text, want in cases:
+            with open(self.models_path, "w", encoding="utf-8", newline="") as f:
+                f.write(text)
+            srv.reset_status_caches()
+            self.assertEqual(srv.runner_alias_to_id(), want, text)
+
+    def test_the_file_is_read_again_only_when_it_changes(self):
+        with mock.patch.object(srv.json, "load", wraps=srv.json.load) as load:
+            for _ in range(5):
+                srv.runner_alias_to_id()
+            self.assertEqual(load.call_count, 1)
+            self.write_models({"only": "Only-One"})
+            self.assertEqual(srv.runner_alias_to_id(), {"Only-One": "only"})
+            self.assertEqual(load.call_count, 2)
+
+    def test_load_model_needs_a_model_id(self):
+        with mock.patch.object(srv, "begin_model_load") as load:
+            r = self.client.post("/api/load_model", json={"model_id": "  "})
+            self.assertEqual(r.status_code, 400)
+            load.assert_not_called()
 
 
 if __name__ == "__main__":

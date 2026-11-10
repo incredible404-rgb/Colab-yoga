@@ -37,6 +37,7 @@ type Paths struct {
 	ConfigDir string // %LOCALAPPDATA%\Colab-yoga
 	Settings  string
 	Keeper    string
+	Token     string // the server's control token, written by the bridge (wake, discover_url)
 	// Runner scripts with real keys, exported by colab-gpu-llm-service's colab_kernel.py:
 	// next to the install first, then the standard install (for a package unzipped
 	// elsewhere). Never part of a release package. The first that exists is used.
@@ -76,6 +77,7 @@ func pathsFor(local, appDir string) Paths {
 		ConfigDir: cfg,
 		Settings:  filepath.Join(cfg, "settings.json"),
 		Keeper:    filepath.Join(cfg, "keeper.json"),
+		Token:     filepath.Join(cfg, "server_token.json"),
 		Runners: []string{
 			filepath.Join(appDir, "colab_kernel_runners.json"),
 			filepath.Join(local, "Programs", "Colab-yoga", "colab_kernel_runners.json"),
@@ -199,10 +201,39 @@ type Status struct {
 	ContextLength  float64    `json:"context_length"`
 }
 
-type Server struct{ http *http.Client }
+// errUnauthorized is a 401 from the server: the control token is missing or belongs to an
+// earlier deployment. discover_url fetches the current one from the VM.
+var errUnauthorized = errors.New("HTTP 401")
 
-func newServer() *Server {
-	return &Server{http: &http.Client{Timeout: 25 * time.Second}}
+// Server talks to the Colab-yoga server's HTTP API. Every call but GET /api/status needs
+// the Bearer token the bridge stored in tokenPath (wake, discover_url); a server older
+// than the token ignores the header, so sending it is always safe.
+type Server struct {
+	http      *http.Client
+	tokenPath string
+}
+
+func newServer(tokenPath string) *Server {
+	return &Server{http: &http.Client{Timeout: 25 * time.Second}, tokenPath: tokenPath}
+}
+
+// token is read from the file on every call: a wake or a discover writes a new one
+// while the console runs.
+func (s *Server) token() string {
+	if s.tokenPath == "" {
+		return ""
+	}
+	b, err := os.ReadFile(s.tokenPath)
+	if err != nil {
+		return ""
+	}
+	var m struct {
+		Token string `json:"token"`
+	}
+	if json.Unmarshal(b, &m) != nil {
+		return ""
+	}
+	return strings.TrimSpace(m.Token)
 }
 
 func (s *Server) do(req *http.Request) (*Status, error) {
@@ -211,6 +242,9 @@ func (s *Server) do(req *http.Request) (*Status, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, errUnauthorized
+	}
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
@@ -240,6 +274,9 @@ func (s *Server) Post(base, path string, body any) (*Status, error) {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if t := s.token(); t != "" {
+		req.Header.Set("Authorization", "Bearer "+t)
+	}
 	return s.do(req)
 }
 
@@ -445,6 +482,8 @@ func shortErr(err error) string {
 		return "超时"
 	case strings.Contains(s, "refused"):
 		return "拒绝连接"
+	case errors.Is(err, errUnauthorized):
+		return "控制令牌无效，正在从云端重新取"
 	}
 	if len(s) > 60 {
 		s = s[:60]
@@ -594,19 +633,6 @@ func probeAccess(tsURL, mcpURL string) Access {
 		a.Magpie.Listed = a.Magpie.lists(a.Llama.Alias)
 	}
 	return a
-}
-
-// defaultTailscaleURL finds the Tailscale Service host the colab_kernel runners publish.
-func defaultTailscaleURL(p Paths) string {
-	b, err := os.ReadFile(p.runnersFile())
-	if err != nil {
-		return ""
-	}
-	m := regexp.MustCompile(`\b([a-z0-9-]+\.tail[a-z0-9]+\.ts\.net)\b`).FindSubmatch(b)
-	if m == nil {
-		return ""
-	}
-	return "http://" + string(m[1]) + ":443"
 }
 
 // ─── Region from a Colab endpoint name, e.g. gpu-g4-s-asso1c0-3i88… → asso1 ─────

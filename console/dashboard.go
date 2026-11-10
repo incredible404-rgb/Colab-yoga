@@ -137,7 +137,7 @@ func (a *App) modelCard(c *ui.Context, p Palette) ui.Element {
 			pill(c, "未连接", p.Muted)
 		}
 	}, func() {
-		m := modelByID(id)
+		m := a.modelByID(id)
 		// One headline that morphs letter by letter as the model changes (Magic Move).
 		head, size, col := "云端还没有模型在跑", float32(22), p.Text2
 		switch {
@@ -146,7 +146,7 @@ func (a *App) modelCard(c *ui.Context, p Palette) ui.Element {
 		case online:
 			head, col = alias, p.Text
 		case loading:
-			head, col = "正在装载 "+modelName(a.switching), p.Text
+			head, col = "正在装载 "+a.modelName(a.switching), p.Text
 		}
 		h := ui.Text(c.Key("headline"), head).Font(fontSerif).FontSize(size).SingleLine().ContentTransition(morph)
 		h.TextColor(h.AnimateColor("c", col, fadeColor))
@@ -159,7 +159,9 @@ func (a *App) modelCard(c *ui.Context, p Palette) ui.Element {
 				for _, tag := range m.Tags {
 					chip(c, p, tag)
 				}
-				chip(c, p, fmt.Sprintf("%.1f GB", m.SizeGB))
+				if m.SizeGB > 0 {
+					chip(c, p, fmt.Sprintf("%.1f GB", m.SizeGB))
+				}
 				if n := a.ctxTokens(); n > 0 {
 					chip(c, p, fmt.Sprintf("%dK 上下文", n/1024))
 				}
@@ -204,10 +206,10 @@ func (a *App) modelCard(c *ui.Context, p Palette) ui.Element {
 				label = "加载模型"
 			}
 			ui.Button(c, label+" ▾").Padding(7, 16).Radius(8).Background(p.Ink).TextColor(p.InkText).
-				FontSize(13).FontWeight(600).Disabled(!a.connected || loading).Menu(func(menu *ui.Menu) {
-				for i := range catalog {
-					mm := &catalog[i]
-					item := menu.Item(fmt.Sprintf("%s  ·  %.0f GB", mm.Name, mm.SizeGB)).Checked(online && mm.ID == id)
+				FontSize(13).FontWeight(600).Disabled(!a.connected || loading || len(a.catalog) == 0).Menu(func(menu *ui.Menu) {
+				for i := range a.catalog {
+					mm := &a.catalog[i]
+					item := menu.Item(modelLabel(mm)).Checked(online && mm.ID == id)
 					if item.Chosen() && mm.ID != id {
 						a.switchTarget, a.askSwitch = mm.ID, true
 					}
