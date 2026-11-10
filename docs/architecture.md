@@ -170,7 +170,12 @@ therefore shows what the ledger deducted, not uptime × rate:
 - Spent this session = `start_balance` − balance. It is exact when the session started from an
   `idle_balance` read within 2 h; otherwise it counts from the session's first reading and the
   console shows it as "≥ … 自 HH:MM 起". A rise in the balance is a top-up: it moves
-  `start_balance` up and is never counted as negative spending.
+  `start_balance` up and is never counted as negative spending. Next to it the card shows
+  "约 X 待结算": the shown rate times the time since the last settlement (or the session start),
+  at most 10 minutes' worth, so the first minutes do not read as a bare 0.00. It is labelled as
+  an estimate and never added to the deducted figure. Observed twice (1 and 3 minutes): the
+  time between the last settlement and a release was never deducted afterwards, so at release
+  the pending figure is an upper bound.
 - The rate shown is measured from the points once the last 35 min hold at least 3 steps
   (single steps jitter by several percent); until then it is the advertised rate, labelled so.
   The server's `session_cu_used` (uptime × a per-GPU table) is only a fallback while no

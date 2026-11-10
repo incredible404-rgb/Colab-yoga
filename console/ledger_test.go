@@ -145,6 +145,36 @@ func TestBillShowsWhatTheLedgerDeducted(t *testing.T) {
 	}
 }
 
+func TestPendingIsWhatRanSinceTheLastSettlement(t *testing.T) {
+	a, now := billingApp(t, true)
+	rate, _, _ := a.ledger.MeasuredRate()
+	want := rate * 2 / 60 // the last settlement was 2 minutes ago
+	if got := a.pendingCU(now); math.Abs(got-want) > 1e-9 {
+		t.Errorf("pending %v, want %v", got, want)
+	}
+	tt := ui.NewTesterWith(a.view, 1440, 900, ui.TesterOptions{Dark: true})
+	if s := fmt.Sprintf("约 %.2f 待结算", want); !hasTextPart(tt, s) {
+		t.Errorf("bill lacks %q; texts %q", s, tt.Texts())
+	}
+	// Before the first settlement it counts from the session start: not a bare 0.00.
+	a.ledger.Session.Points = nil
+	a.ledger.Session.StartAt = now.Add(-4 * time.Minute)
+	a.ledger.Balance = a.ledger.Session.StartBalance
+	tt = ui.NewTesterWith(a.view, 1440, 900, ui.TesterOptions{Dark: true})
+	if s := fmt.Sprintf("约 %.2f 待结算", 10.05*4/60); !hasTextPart(tt, "0.00 CU") || !hasTextPart(tt, s) {
+		t.Errorf("first minutes lack %q; texts %q", s, tt.Texts())
+	}
+	// Settlements that stop arriving do not grow it past the cap.
+	a.ledger.Session.StartAt = now.Add(-90 * time.Minute)
+	if got := a.pendingCU(now); math.Abs(got-10.05*ledgerPendingCap.Hours()) > 1e-9 {
+		t.Errorf("capped pending %v", got)
+	}
+	a.ledger.Active = 0
+	if got := a.pendingCU(now); got != 0 {
+		t.Errorf("nothing is pending without a live session: %v", got)
+	}
+}
+
 func TestBillMarksASessionWhoseStartWasNotSeen(t *testing.T) {
 	a, _ := billingApp(t, false)
 	tt := ui.NewTesterWith(a.view, 1440, 900, ui.TesterOptions{Dark: true})

@@ -398,6 +398,8 @@ const (
 	ledgerMinSteps = 3
 	ledgerWindow   = 35 * time.Minute
 	ledgerStale    = 2 * time.Minute // older than this the keeper is not reading it
+	// at most two settlement intervals are ever shown as not yet deducted
+	ledgerPendingCap = 10 * time.Minute
 )
 
 type LedgerPoint struct {

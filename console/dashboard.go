@@ -90,6 +90,24 @@ func (a *App) uptimeAt(now time.Time) float64 {
 	return a.status.Uptime + a.sinceStatus(now)
 }
 
+// pendingCU estimates what has run since the ledger last settled and is not deducted yet:
+// the shown rate times the time since the last settlement (or since the session began). It
+// is capped at ledgerPendingCap so settlements that stop arriving do not grow it unbounded.
+func (a *App) pendingCU(now time.Time) float64 {
+	if !a.ledgerLive(now) {
+		return 0
+	}
+	from := a.ledger.LastSettle()
+	if from.IsZero() {
+		from = a.ledger.Session.StartAt
+	}
+	if from.IsZero() {
+		return 0
+	}
+	rate, _, _ := a.burnRate(now)
+	return rate * min(max(0, now.Sub(from)), ledgerPendingCap).Hours()
+}
+
 func agoText(d time.Duration) string {
 	if d < time.Minute {
 		return "不到 1 分钟前"
@@ -144,13 +162,17 @@ func (a *App) billCard(c *ui.Context, p Palette) ui.Element {
 			} else {
 				metric(c, p, "本次运行", "—", "", 20, p.Text3)
 			}
+			pending := ""
+			if cu := a.pendingCU(now); cu >= 0.01 {
+				pending = fmt.Sprintf(" · 约 %.2f 待结算", cu)
+			}
 			switch {
 			case live && led.Session.Exact:
-				metricRoll(c, p, "本次已花", fmt.Sprintf("%.2f CU", led.Spent()), "账本实扣", 20, p.Text, numeric).
-					Tooltip(fmt.Sprintf("开机前余额 %s − 当前余额。账本约每 5 分钟结算，最近几分钟的还没扣", thousands(led.Session.StartBalance)))
+				metricRoll(c, p, "本次已花", fmt.Sprintf("%.2f CU", led.Spent()), "账本实扣"+pending, 20, p.Text, numeric).
+					Tooltip(fmt.Sprintf("开机前余额 %s − 当前余额。账本约每 5 分钟结算；「待结算」是上次结算以来按当前速率估的、还没扣的部分；释放时最后这段实测没有被扣", thousands(led.Session.StartBalance)))
 			case live:
-				metricRoll(c, p, "本次已花", fmt.Sprintf("≥ %.2f CU", led.Spent()), "自 "+led.Session.StartAt.Format("15:04")+" 起实扣", 20, p.Text, numeric).
-					Tooltip("没记录到开机前的余额，只算从这之后官方账本的实际扣减")
+				metricRoll(c, p, "本次已花", fmt.Sprintf("≥ %.2f CU", led.Spent()), "自 "+led.Session.StartAt.Format("15:04")+" 起实扣"+pending, 20, p.Text, numeric).
+					Tooltip("没记录到开机前的余额，只算从这之后官方账本的实际扣减；「待结算」是还没扣的估计")
 			case st != nil && a.connected:
 				metricRoll(c, p, "本次已花", fmt.Sprintf("≈ %.1f CU", a.uptimeAt(now)/3600*official), "估算", 20, p.Text, numeric).
 					Tooltip("运行时长 × 官方报价。后台保活记下账本后改为实扣")
