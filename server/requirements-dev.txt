@@ -1,0 +1,4 @@
+# Only for running server/test_server.py on this PC (tools/install.py makes a venv
+# with these). On the Colab VM, vm_boot.py installs what is missing there.
+fastapi
+httpx

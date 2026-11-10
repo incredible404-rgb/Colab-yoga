@@ -1,0 +1,5 @@
+Colab-yoga
+
+bridge/colab_yoga_bridge.py and server/colab_yoga_server.py are derived from
+EasyColab (https://github.com/wy51ai/easycolab) by wy51ai, licensed under the
+Apache License, Version 2.0. They have been substantially modified.

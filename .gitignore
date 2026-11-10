@@ -1,0 +1,17 @@
+# Runner scripts with real API / Tailscale keys: never commit
+colab_kernel_runners.json
+.env
+.env.*
+*token*.json
+*credentials*.json
+
+# Build output and caches
+console/dist/
+console/build/
+__pycache__/
+*.py[cod]
+.venv/
+
+# Editors
+.idea/
+.vscode/
