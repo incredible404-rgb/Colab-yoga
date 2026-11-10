@@ -204,7 +204,7 @@ def main(argv=None) -> int:
             print("  " + p)
         return 1
     digest = install.sha256_of(zip_path)
-    (out / (zip_path.name + ".sha256")).write_text(f"{digest} *{zip_path.name}\n", encoding="ascii")
+    (out / (zip_path.name + ".sha256")).write_text(f"{digest} *{zip_path.name}\n", encoding="ascii", newline="\n")  # LF, so `sha256sum -c` works on every OS
     print(f"package: {zip_path} ({zip_path.stat().st_size / (1024 * 1024):.1f} MB, {len(names)} files)")
     print(f"package: sha256 {digest}")
     print("package: audit OK (no runners/settings/keeper/token/credential files, no .pyc, no secret patterns)")
