@@ -2,7 +2,7 @@
 
 [简体中文](README.md) | English
 
-> **When & Why to Use**: For managing Google Colab paid GPU LLM instances from your local desktop—a native Go + MyGo system-tray console and keepalive bridge that wakes/releases GPUs, monitors CU balance and endpoint health, and auto-stops idle instances across web chat, Magpie, and MCP.
+A system tray console for self-hosted LLMs on paid Google Colab GPUs: wake or release the instance in one click, keep an eye on your balance and on whether each endpoint is reachable, and let it shut down on its own when nobody is using it.
 
 Run your own large language models on paid Google Colab GPUs (default: G4 · RTX PRO 6000 96 GB) and expose `llama-server :8081` over Tailscale to web chat, Magpie, and the MCP novel-directory bridge. Chat traffic does not pass through Colab-yoga; Colab-yoga only manages the GPU: how much it costs, which model is running, whether each entrypoint is reachable, keeping the instance alive while in use, and releasing it automatically when idle.
 
