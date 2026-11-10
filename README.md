@@ -65,6 +65,10 @@ py -3.12 tools/package.py --out <仓库之外的目录>
 
 按安装同样的流程在临时目录里组好，压成 `Colab-yoga-<版本>-windows-amd64.zip`（同目录有 `.sha256`），并审计内容：不含 `colab_kernel_runners.json`、`settings.json`、`keeper.json`、token 或凭据类文件、`.pyc`、密钥特征字符串，发现就删掉 zip 并报错。
 
+## 给 agent 用
+
+[skills/colab-yoga/SKILL.md](skills/colab-yoga/SKILL.md) 是给 Claude Code、Codex 等 agent 的技能：安装、绑定账号、唤醒 / 释放、查余额与模型、切换模型，花钱的动作会先向你确认。把 `skills/colab-yoga` 整个文件夹复制到 agent 的技能目录（如 `~/.claude/skills/` 或 `~/.agents/skills/`）即可；模型本身的部署见 [colab-gpu-llm-service](https://github.com/incredible404-rgb/colab-gpu-llm-service) 自带的技能。
+
 ## 日常使用
 
 - 开始菜单或桌面上的「Colab-yoga」。只会运行一个实例：再次打开时，会把已在运行的窗口调出来。

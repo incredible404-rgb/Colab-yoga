@@ -65,6 +65,10 @@ py -3.12 tools/package.py --out <a directory outside the repo>
 
 It stages the package the same way an install does, in a temporary directory, zips it to `Colab-yoga-<version>-windows-amd64.zip` (plus a `.sha256`), and audits the result: no `colab_kernel_runners.json`, `settings.json`, `keeper.json`, token or credential files, `.pyc` files, or key-shaped strings. If anything turns up, the zip is deleted and the build fails.
 
+## For agents
+
+[skills/colab-yoga/SKILL.md](skills/colab-yoga/SKILL.md) is a skill for Claude Code, Codex and other agents: install, bind the account, wake / release, read balance and model, switch models; anything that spends money is confirmed with you first. Copy the whole `skills/colab-yoga` folder into the agent's skills directory (e.g. `~/.claude/skills/` or `~/.agents/skills/`). Model deployment itself is covered by the skill that ships with [colab-gpu-llm-service](https://github.com/incredible404-rgb/colab-gpu-llm-service).
+
 ## Daily Usage
 
 - Launch **Colab-yoga** from the Start menu or desktop shortcut. Only a single instance runs: launching it again brings the existing window to the front.
