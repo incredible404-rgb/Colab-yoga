@@ -422,6 +422,7 @@ def cmd_stop_all():
         except Exception:
             pass
 
+        stop_local_mcp_if_unused()
         info = state.client.get_consumption_user_info()
         ledger_record(info.paid_compute_units_balance, info.assignments_count, info.consumption_rate_hourly)
         print(json.dumps({
@@ -588,6 +589,12 @@ def _on_wake_url(token: str) -> None:
         print("WAKE_LOG: ⚠️ 后台保活没能启动：请手动运行 colab_yoga_bridge.py keeper，否则实例约 21-35 分钟后会被回收。", flush=True)
     elif result == "started":
         print("WAKE_LOG: 已启动后台保活（独立进程，关掉这个命令也不会中断）", flush=True)
+
+    mcp = ensure_local_mcp()
+    if mcp["state"] == "started":
+        print("WAKE_LOG: 已启动本机 MCP 桥", flush=True)
+    elif mcp["state"] == "failed":
+        print(f"WAKE_LOG: ⚠️ 本机 MCP 桥没能启动（{mcp['error']}）。GPU 不受影响；网页里用本机工具会报错，修好后重新 wake 即可。", flush=True)
 
 
 def _release_fresh_session(session: SessionState):
@@ -1109,15 +1116,15 @@ def _keeper_wait(until: float, endpoint: str, next_ledger: float) -> float:
         time.sleep(max(0.05, min(until, next_ledger) - now))
 
 
-def _track_a_covers(endpoint: str) -> bool:
-    """colab-gpu-llm-service's own keep-alive daemon already beats this runtime."""
+def _track_a_covers(endpoint: str | None) -> bool:
+    """Whether a live CLI keeper covers this endpoint, or any endpoint when None."""
     import glob
 
     for f in glob.glob(os.path.join(os.path.expanduser("~/.config/colab-cli"), "keepalive-*.json")):
         try:
             with open(f, "r", encoding="utf-8") as fh:
                 ka = json.load(fh)
-            if ka.get("endpoint") == endpoint and _pid_alive(int(ka.get("pid") or 0)):
+            if (endpoint is None or ka.get("endpoint") == endpoint) and _pid_alive(int(ka.get("pid") or 0)):
                 return True
         except Exception:
             continue
@@ -1219,6 +1226,8 @@ def cmd_keeper():
     last_assign_check = 0.0
     next_ledger = 0.0
     sess = None
+    mcp_check = None  # the in-flight local MCP check; a thread, so a slow helper cannot stall a beat
+    last_mcp_check = 0.0
     try:
         while True:
             cycle = time.time()
@@ -1278,6 +1287,11 @@ def cmd_keeper():
             if decision == "stop":
                 st["exit_reason"] = "server_unreachable"
                 break
+            # A live session is confirmed here (sess came from the account's assignments).
+            if cycle - last_mcp_check >= LOCAL_MCP_CHECK_S and (mcp_check is None or not mcp_check.is_alive()):
+                last_mcp_check = cycle
+                mcp_check = threading.Thread(target=ensure_local_mcp, daemon=True)
+                mcp_check.start()
             _keeper_save(st)
             next_ledger = _keeper_wait(time.time() + max(1.0, KEEPER_BEAT_S - (time.time() - cycle)),
                                        sess.endpoint, next_ledger)
@@ -1286,6 +1300,9 @@ def cmd_keeper():
     finally:
         if st.get("exit_reason") in ("idle_release", "no_assignment"):
             ledger_poll(st.get("endpoint") or "")  # the release settlement, and the session's end
+            if mcp_check is not None:
+                mcp_check.join(LOCAL_MCP_TIMEOUT_S)  # a start still in flight must not outlive the stop
+            stop_local_mcp_if_unused()
         st["ended"] = time.time()
         st["exit_reason"] = st.get("exit_reason") or "loop_ended"
         _keeper_save(st)
@@ -1358,6 +1375,138 @@ def stop_keeper() -> None:
             pass
 
 
+# ─── Local MCP bridge (optional) ──────────────────────────────────────────────
+# The MCP server on this PC that the cloud model reaches through the VM's forwarder. Its
+# process is managed by a helper script found at run time, never hard-coded here: this file
+# only runs `start|status|stop` on it. The helper owns the process it starts, so stop never
+# touches a server started by hand or by another program, and nothing is killed by port.
+LOCAL_MCP_CHECK_S = 60  # while a session is live, the keeper checks the local MCP at most this often
+LOCAL_MCP_TIMEOUT_S = 15  # the helper waits up to 8 s for readiness; past this the call counts as failed
+LOCAL_MCP_CONFIG = "local_mcp_bridge.json"
+LOCAL_MCP_SKILL_SCRIPT = os.path.join("skills", "colab-gpu-llm-service", "scripts", "local_mcp.py")
+
+
+def _install_dir() -> str:
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def local_mcp_script_path(install_dir: str = None, env=None, home: str = None):
+    """The helper script: the first existing of $COLAB_LOCAL_MCP_SCRIPT, the install's
+    local_mcp_bridge.json "script", then the colab-gpu-llm-service skill under ~/.agents and
+    ~/.claude. Relative paths count from the install dir. None when there is none, which is
+    the normal state of an install without the local MCP."""
+    install_dir = _install_dir() if install_dir is None else install_dir
+    env = os.environ if env is None else env
+    home = os.path.expanduser("~") if home is None else home
+    candidates = [env.get("COLAB_LOCAL_MCP_SCRIPT") or ""]
+    try:
+        with open(os.path.join(install_dir, LOCAL_MCP_CONFIG), "r", encoding="utf-8") as f:
+            candidates.append(str(json.load(f).get("script") or ""))
+    except Exception:
+        pass
+    candidates += [os.path.join(home, ".agents", LOCAL_MCP_SKILL_SCRIPT),
+                   os.path.join(home, ".claude", LOCAL_MCP_SKILL_SCRIPT)]
+    for cand in candidates:
+        if cand:
+            path = os.path.abspath(os.path.join(install_dir, cand))
+            if os.path.isfile(path):
+                return path
+    return None
+
+
+def _local_mcp_python() -> str:
+    """The bundled runtime's python.exe, else the interpreter in use."""
+    cand = os.path.join(_install_dir(), "runtime", "python.exe")
+    return cand if os.path.isfile(cand) else sys.executable
+
+
+def run_local_mcp(action: str):
+    """Run the helper's `start`, `status` or `stop` and return its last JSON line. ok is false
+    on a non-zero exit, a timeout, or unreadable output. None when no helper is found. Output
+    goes to a temp file, not a pipe: a process the helper starts may inherit a pipe and keep it
+    open, which would stall the read past the timeout."""
+    script = local_mcp_script_path()
+    if script is None:
+        return None
+    cmd = [_local_mcp_python(), "-X", "utf8", script, action]
+    kwargs = {"creationflags": 0x08000000} if sys.platform == "win32" else {}  # CREATE_NO_WINDOW
+    with tempfile.TemporaryFile() as out:
+        try:
+            done = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                                  timeout=LOCAL_MCP_TIMEOUT_S, **kwargs)
+        except (OSError, subprocess.SubprocessError) as e:
+            return {"ok": False, "error": f"helper did not finish ({type(e).__name__})"}
+        out.seek(0)
+        text = out.read().decode("utf-8", errors="replace")
+    lines = [line for line in text.splitlines() if line.strip().startswith("{")]
+    result = {}
+    if lines:
+        try:
+            parsed = json.loads(lines[-1])
+            if isinstance(parsed, dict):
+                result = parsed
+        except ValueError:
+            pass
+    result["ok"] = bool(result.get("ok")) and done.returncode == 0
+    if not result["ok"] and not result.get("error"):
+        result["error"] = (f"helper reported failure (exit {done.returncode})" if lines
+                           else f"helper printed no status line (exit {done.returncode})")
+    return result
+
+
+def ensure_local_mcp() -> dict:
+    """{"state": "absent" | "running" | "started" | "failed", "error": str}. Safe to repeat: the
+    helper decides whether anything has to start, and says whether this call started it."""
+    res = run_local_mcp("start")
+    if res is None:
+        return {"state": "absent", "error": ""}
+    if not res.get("ok"):
+        return {"state": "failed", "error": str(res.get("error"))}
+    return {"state": "started" if res.get("started") else "running", "error": ""}
+
+
+def stop_local_mcp():
+    """Called when the last session is released. The helper stops only what it owns."""
+    return run_local_mcp("stop")
+
+
+def stop_local_mcp_if_unused():
+    """A second manager may still own a session; an unavailable account is not proof of idleness."""
+    _, assignments, synced = _safe_sync_sessions(with_status=True)
+    if not synced or assignments or _track_a_covers(None):
+        return None
+    return stop_local_mcp()
+
+
+def _status_confirms_running(st) -> bool:
+    """A start that returned is not proof that the server is up. Only the helper's own read-only
+    status is: it confirms with running true, or with a pid that is alive."""
+    if not isinstance(st, dict) or st.get("ok") is False or st.get("running") is False:
+        return False
+    if st.get("running") is True:
+        return True
+    try:
+        return _pid_alive(int(st.get("pid") or 0))
+    except (TypeError, ValueError):
+        return False
+
+
+def cmd_mcp_start() -> dict:
+    """The console's manual fallback for the local MCP. It starts that server and nothing else:
+    no GPU is woken or kept, so it works with no runtime running."""
+    mcp = ensure_local_mcp()
+    if mcp["state"] == "absent":
+        return {"ok": False, "state": "absent",
+                "error": f"没找到本机 MCP 桥脚本 local_mcp.py：请安装 colab-gpu-llm-service 的 scripts/local_mcp.py，或在安装目录的 {LOCAL_MCP_CONFIG} 里写明它的路径"}
+    if mcp["state"] == "failed":
+        return {"ok": False, "state": "failed", "error": mcp["error"]}
+    status = run_local_mcp("status")  # the helper's read-only status is the proof, not the start
+    if not _status_confirms_running(status):
+        why = (status or {}).get("error") or "没有返回运行状态"
+        return {"ok": False, "state": "failed", "error": f"启动命令已返回，但状态检查没确认服务在跑：{why}"}
+    return {"ok": True, "state": mcp["state"], "error": ""}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Colab-yoga Bridge")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -1387,6 +1536,7 @@ def main(argv=None):
     sub.add_parser("stop_all")
     sub.add_parser("discover_url")
     sub.add_parser("keeper")
+    sub.add_parser("mcp_start")
 
     args = parser.parse_args(argv)
     if args.cmd == "auth_status":
@@ -1407,6 +1557,8 @@ def main(argv=None):
         cmd_discover_url()
     elif args.cmd == "keeper":
         cmd_keeper()
+    elif args.cmd == "mcp_start":
+        print(json.dumps(cmd_mcp_start(), ensure_ascii=False), flush=True)
 
 
 def run_cli(argv=None):

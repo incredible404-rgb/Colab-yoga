@@ -384,6 +384,14 @@ func TestSnapshots(t *testing.T) {
 		{"connection_dark_1024", 1024, 640, func(a *App) { a.page = "connection" }},
 		{"confirm_unload_dark_1024", 1024, 900, func(a *App) { a.askUnload = true }},
 		{"confirm_logout_dark_1024", 1024, 640, func(a *App) { a.askLogout = true }},
+		{"mcp_failed_dark_1024", 1024, 640, func(a *App) {
+			stateIdle(a)
+			a.mcpStartErr = "端口 3426 被其他程序占用"
+		}},
+		{"mcp_starting_dark_1024", 1024, 640, func(a *App) {
+			stateIdle(a)
+			a.mcpStarting = true
+		}},
 	}
 	for _, s := range shots {
 		a := fakeApp(t)
@@ -393,6 +401,10 @@ func TestSnapshots(t *testing.T) {
 		tt := ui.NewTesterWith(a.view, s.w, s.h, ui.TesterOptions{Dark: a.themeName != "light"})
 		tt.Frame()
 		tt.Advance(2 * time.Second) // let the cards finish arriving
+		if s.name == "mcp_failed_dark_1024" || s.name == "mcp_starting_dark_1024" {
+			tt.Scroll(float32(s.w-100), float32(s.h-100), 0, 700)
+			tt.Advance(600 * time.Millisecond)
+		}
 		f, err := os.Create(filepath.Join(dir, s.name+".png"))
 		if err != nil {
 			t.Fatal(err)

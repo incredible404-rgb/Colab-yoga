@@ -962,7 +962,7 @@ def _ensure_mcp_bridge() -> None:
     ok = _port_listening(port)
     MCP_BRIDGE_STATE.update(listening=ok, owner="proc" if ok else "", error="" if ok else "forwarder did not start")
     if ok:
-        print(f"[MCP 桥] 已在 127.0.0.1:{port} 常驻（独立进程），经 Tailscale 转发到本机小说目录服务", flush=True)
+        print(f"[MCP 桥] 已在 127.0.0.1:{port} 常驻（独立进程），经 Tailscale 转发到本机 MCP 服务", flush=True)
         _mcp_bridge_selftest()
 
 

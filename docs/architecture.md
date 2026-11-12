@@ -1,8 +1,8 @@
 # Colab-yoga architecture
 
 Colab-yoga runs the owner's own LLMs (colab-gpu-llm-service's colab_kernel runners) on a
-Colab GPU and serves them on llama-server :8081 over Tailscale to the web UI, Magpie and an
-MCP novel-folder bridge. Conversations never pass through Colab-yoga; it manages the GPU:
+Colab GPU and serves them on llama-server :8081 over Tailscale to the web UI, Magpie and a
+local MCP bridge. Conversations never pass through Colab-yoga; it manages the GPU:
 what it costs, which model runs, whether each way in works, and that the runtime stays alive
 exactly as long as it is used. LLM only: no video, image, ComfyUI or Gradio API gateway.
 
@@ -65,6 +65,26 @@ no model and says to export it from colab-gpu-llm-service (`colab_kernel.py`); i
 file when it changes. The console takes the access address (Tailscale Service host) from the
 `SERVICE_FQDN` in the scripts, else from the first `*.ts.net` host in them; when neither is
 there, fill it in by hand under "Connection" → "Access addresses".
+
+### Local MCP lifecycle
+
+The PC bridge is supplied by colab-gpu-llm-service: `local_mcp.py start|status|stop`
+runs the Pi-native tool server `local_mcp.mjs`. The helper owns config creation, a cross-process
+lifecycle lock, authenticated readiness and PID-verified stopping. Its final stdout line is JSON
+and contains no token. Discovery uses `COLAB_LOCAL_MCP_SCRIPT`, install-local
+`local_mcp_bridge.json` (`script`), then the standard agent skill directories.
+
+Wake starts it after the server URL is known. The keeper checks at most once per 60 seconds
+on a background thread, so an 8-second readiness wait cannot stall the kernel heartbeat.
+Automatic cleanup rechecks account assignments and live CLI keepers; unknown or still-active
+accounts keep the bridge. The dashboard offers an asynchronous start independent of any GPU,
+locks the button during a request, then refreshes identity-based `/health` before presenting
+the result. A foreign listener is never considered healthy or stopped.
+
+The local tools use a dedicated Bearer token, distinct from the cloud control token below.
+It stays in `~/.config/colab-cli/local-mcp.json` and private client settings. Public WebUI
+defaults, notebooks and runners carry only the `local_mcp` name and proxy URL. The four tools
+run with the current user permissions; cwd is not a sandbox and Pi session policy is not loaded.
 
 ### Control token
 

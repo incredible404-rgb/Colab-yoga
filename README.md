@@ -4,7 +4,7 @@
 
 常驻系统托盘的 Colab GPU 管理台：一键唤醒、释放 Google Colab 付费 GPU 上的大模型实例，随时查看余额和各入口是否连通，没人用时自动关停。
 
-在 Google Colab 付费 GPU（默认 G4 · RTX PRO 6000 96 GB）上跑自己的大模型，并通过 Tailscale 把 llama-server :8081 提供给网页对话、Magpie 和 MCP 小说目录桥。对话不经过 Colab-yoga，它只负责管理 GPU：花了多少钱、跑的是哪个模型、每个入口通不通，以及让实例在有人用时一直活着、没人用时自动释放。
+在 Google Colab 付费 GPU（默认 G4 · RTX PRO 6000 96 GB）上跑自己的大模型，并通过 Tailscale 把 llama-server :8081 提供给网页对话、Magpie 和本机 MCP 桥。对话不经过 Colab-yoga，它只负责管理 GPU：花了多少钱、跑的是哪个模型、每个入口通不通，以及让实例在有人用时一直活着、没人用时自动释放。
 
 ![Colab-yoga 界面与非线性动效](docs/motion.gif)
 
@@ -12,7 +12,15 @@
 |---|---|
 | ![深色模式仪表盘](docs/dashboard-dark.png) | ![浅色模式仪表盘](docs/dashboard-light.png) |
 
-模型本身（colab_kernel 启动脚本、模型清单、中文思考补丁、小说 MCP 服务）在 colab-gpu-llm-service 项目里，不在这个仓库。管理台的模型列表就是导出的 `colab_kernel_runners.json` 里有什么就列什么，自己加的模型也会出现。
+模型本身（colab_kernel 启动脚本、模型清单、中文思考补丁、本机 MCP 服务）在 colab-gpu-llm-service 项目里，不在这个仓库。管理台的模型列表就是导出的 `colab_kernel_runners.json` 里有什么就列什么，自己加的模型也会出现。
+
+## 已实现的功能
+
+- GPU 与模型：唤醒、加载与切换模型、续时、释放，独立保活和闲置自动关停。
+- 状态与用量：余额、计费速率、显存、推理槽位，以及网页、API、Magpie 和本机 MCP 的连通状态。
+- 本机 MCP：唤醒时自动启动，GPU 活跃期间每 60 秒检查并恢复，最后一个会话结束时安全关闭。
+- 手动兜底：MCP 卡片的「启动」按钮在没有 GPU 时也可用；后台启动、禁止重复点击，失败显示原因并可重试。按钮复用现有组件和动效。
+- 原生界面：系统托盘、深浅配色、弹簧位移、按压反馈、减少动画选项，静止时停止绘制。
 
 ## 组成
 
@@ -64,6 +72,20 @@ py -3 tools/package.py --out <仓库之外的目录>
 ```
 
 按安装同样的流程在临时目录里组好，压成 `Colab-yoga-<版本>-windows-amd64.zip`（同目录有 `.sha256`），并审计内容：不含 `colab_kernel_runners.json`、`settings.json`、`keeper.json`、token 或凭据类文件、`.pyc`、密钥特征字符串，发现就删掉 zip 并报错。
+
+## 本机 MCP 桥
+
+安装 [colab-gpu-llm-service](https://github.com/incredible404-rgb/colab-gpu-llm-service) 的 `scripts/local_mcp.py` 与同目录的 `local_mcp.mjs`，并准备 Node.js 和 Pi。管理台按顺序查找 `COLAB_LOCAL_MCP_SCRIPT`、安装目录 `local_mcp_bridge.json` 的 `script` 字段，以及 `~/.agents/skills/colab-gpu-llm-service/scripts/local_mcp.py`（兼容 `~/.claude/skills/`）。例如在安装目录放置：
+
+```json
+{"script": "C:/tools/colab-gpu-llm-service/scripts/local_mcp.py"}
+```
+
+唤醒会自动启动本机桥；已经在运行就复用。没启动成功时，在仪表盘的 MCP 卡片点「启动」；不需要先唤醒 GPU。状态检测验证服务身份，其他程序占用 3426 端口时会显示原因，不会误报连通，也不会杀掉该程序。
+
+`local_mcp` 直接复用 Pi 的 `read`、`write`、`edit`、`bash`，以当前 Windows 用户权限运行；工作目录只是默认位置，工具也能访问其他有权限的路径。Pi 会话里的技能、规则和审批不会自动加载。专用 Bearer 令牌由 helper 存在本机 `~/.config/colab-cli/local-mcp.json`，首次在 WebUI 的客户端私有 MCP 设置中配置 `Authorization`，以后复用。真实令牌不写入 notebook、runner 或 WebUI 的公开默认配置。完整配置见服务仓库的介绍页。
+
+![MCP 端口冲突时显示原因并提供重试](docs/mcp-fallback.png)
 
 ## 给 agent 用
 

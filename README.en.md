@@ -4,7 +4,7 @@
 
 A system tray console for self-hosted LLMs on paid Google Colab GPUs: wake or release the instance in one click, keep an eye on your balance and on whether each endpoint is reachable, and let it shut down on its own when nobody is using it.
 
-Run your own large language models on paid Google Colab GPUs (default: G4 · RTX PRO 6000 96 GB) and expose `llama-server :8081` over Tailscale to web chat, Magpie, and the MCP novel-directory bridge. Chat traffic does not pass through Colab-yoga; Colab-yoga only manages the GPU: how much it costs, which model is running, whether each entrypoint is reachable, keeping the instance alive while in use, and releasing it automatically when idle.
+Run your own large language models on paid Google Colab GPUs (default: G4 · RTX PRO 6000 96 GB) and expose `llama-server :8081` over Tailscale to web chat, Magpie, and the local MCP bridge. Chat traffic does not pass through Colab-yoga; Colab-yoga only manages the GPU: how much it costs, which model is running, whether each entrypoint is reachable, keeping the instance alive while in use, and releasing it automatically when idle.
 
 ![Colab-yoga UI & Non-linear Motion](docs/motion.gif)
 
@@ -12,7 +12,15 @@ Run your own large language models on paid Google Colab GPUs (default: G4 · RTX
 |---|---|
 | ![Dark dashboard](docs/dashboard-dark.png) | ![Light dashboard](docs/dashboard-light.png) |
 
-The model runtime itself (`colab_kernel` startup script, model catalog, Chinese thinking-template patches, and novel MCP service) lives in the `colab-gpu-llm-service` repository, not here. The console's model list is whatever the exported `colab_kernel_runners.json` holds, so models you add yourself show up too.
+The model runtime itself (`colab_kernel` startup script, model catalog, Chinese thinking-template patches, and local MCP service) lives in the `colab-gpu-llm-service` repository, not here. The console's model list is whatever the exported `colab_kernel_runners.json` holds, so models you add yourself show up too.
+
+## Implemented features
+
+- GPU and models: wake, load and switch models, extend, release, independent keepalive, and idle shutdown.
+- Status and usage: balance, burn rate, VRAM, inference slots, and connectivity for web chat, API, Magpie, and local MCP.
+- Local MCP: automatic start on wake, recovery checks every 60 seconds while a GPU session is active, and safe shutdown when the last session ends.
+- Manual fallback: the MCP card's **Start** button also works with no GPU. It runs in the background, prevents duplicate clicks, and shows failures with a retry action, using the existing components and motion.
+- Native UI: system tray, dark and light palettes, spring motion, press feedback, reduced motion, and no redraws while idle.
 
 ## Components
 
@@ -64,6 +72,20 @@ py -3 tools/package.py --out <a directory outside the repo>
 ```
 
 It stages the package the same way an install does, in a temporary directory, zips it to `Colab-yoga-<version>-windows-amd64.zip` (plus a `.sha256`), and audits the result: no `colab_kernel_runners.json`, `settings.json`, `keeper.json`, token or credential files, `.pyc` files, or key-shaped strings. If anything turns up, the zip is deleted and the build fails.
+
+## Local MCP bridge
+
+Install `scripts/local_mcp.py` and its neighboring `local_mcp.mjs` from [colab-gpu-llm-service](https://github.com/incredible404-rgb/colab-gpu-llm-service), with Node.js and Pi available. The console looks for `COLAB_LOCAL_MCP_SCRIPT`, the `script` field in `local_mcp_bridge.json` beside the exe, then `~/.agents/skills/colab-gpu-llm-service/scripts/local_mcp.py` (also accepting `~/.claude/skills/`). For example:
+
+```json
+{"script": "C:/tools/colab-gpu-llm-service/scripts/local_mcp.py"}
+```
+
+Wake starts the local bridge automatically and reuses a running instance. If it fails, choose **Start** on the dashboard's MCP card; this works without waking a GPU. Health checks verify the service identity. An unrelated listener on port 3426 is reported as a conflict and is left running.
+
+`local_mcp` directly reuses Pi's `read`, `write`, `edit`, and `bash` with the current Windows user's permissions. The working directory is a default, and other accessible paths remain available. Pi session skills, rules, and approval hooks are not loaded by this bridge. Its dedicated Bearer token stays in local `~/.config/colab-cli/local-mcp.json`; configure `Authorization` once in the WebUI's private client MCP settings. Real tokens are excluded from notebooks, runners, and public WebUI defaults. See the service repository for complete setup instructions.
+
+![MCP conflict reason and retry action](docs/mcp-fallback.png)
 
 ## For agents
 

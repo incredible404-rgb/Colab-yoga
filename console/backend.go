@@ -15,7 +15,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -523,12 +522,83 @@ type MagpieProbe struct {
 	Models                   []string // the provider's model list (never its key)
 }
 
+// mcpStartTimeout covers the helper's own 8 s readiness wait with room to spare.
+const mcpStartTimeout = 30 * time.Second
+
+// mcpStart is the bridge's answer to mcp_start. State is started, running, failed or absent.
+type mcpStart struct {
+	OK    bool
+	State string
+	Error string
+}
+
+// readMCPStart reads that answer. A call that gave no answer, or a failure without a reason,
+// is still a failure the card can say something about.
+func readMCPStart(m map[string]any, err error) mcpStart {
+	if err != nil {
+		return mcpStart{Error: "启动命令没有返回结果：" + err.Error()}
+	}
+	ok, _ := m["ok"].(bool)
+	res := mcpStart{OK: ok, State: str(m, "state", ""), Error: str(m, "error", "")}
+	if !res.OK && res.Error == "" {
+		res.Error = "未说明原因"
+	}
+	return res
+}
+
 type Access struct {
-	At     time.Time
-	Llama  LlamaProbe
-	Magpie MagpieProbe
-	MCPUp  bool
-	MCPErr string
+	At      time.Time
+	Llama   LlamaProbe
+	Magpie  MagpieProbe
+	MCPUp   bool
+	MCPName string // the name the local MCP's /health reports, when it answers
+	MCPErr  string
+}
+
+// mcpName is how the local MCP identifies itself in /health, agreed with the
+// colab-gpu-llm-service side: {"ok": true, "server": "local_mcp", ...}.
+const mcpName = "local_mcp"
+
+// probeMCP asks the local MCP's /health. A listening port proves nothing: any program
+// can hold 3426, so only the name the service reports counts as the MCP being up. A
+// service that answers without a name, or not at all, is reported as what it is.
+func probeMCP(mcpURL string) (up bool, name, errText string) {
+	scheme, host := "http", "127.0.0.1:3426"
+	if u, err := url.Parse(strings.TrimSpace(mcpURL)); err == nil && u.Host != "" {
+		if u.Scheme != "" {
+			scheme = u.Scheme
+		}
+		host = u.Host
+	}
+	resp, err := tailnet.Get(scheme + "://" + host + "/health")
+	if err != nil {
+		return false, "", shortErr(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode != http.StatusOK {
+		return false, "", fmt.Sprintf("端口上有服务但 /health 返回 %d：可能是旧版本机 MCP", resp.StatusCode)
+	}
+	var h struct {
+		OK     bool   `json:"ok"`
+		Server string `json:"server"`
+		Name   string `json:"name"` // the older spelling of server, still accepted
+	}
+	_ = json.Unmarshal(body, &h) // a body that is not JSON reports no name, handled below
+	id := strings.TrimSpace(h.Server)
+	if id == "" {
+		id = strings.TrimSpace(h.Name)
+	}
+	if id == "" {
+		return false, "", "端口上有服务，但 /health 没报出服务名，不是本机 MCP"
+	}
+	if !strings.EqualFold(id, mcpName) {
+		return false, id, fmt.Sprintf("端口上是其他服务（server=%s），不是本机 MCP", id)
+	}
+	if !h.OK {
+		return false, id, "本机 MCP 的 /health 报告未就绪（ok 不是 true）"
+	}
+	return true, id, ""
 }
 
 // Tailnet hosts must not go through a system HTTP proxy.
@@ -732,16 +802,7 @@ func probeAccess(tsURL, mcpURL string) Access {
 	go func() { defer wg.Done(); a.Llama = probeLlama(tsURL) }()
 	go func() {
 		defer wg.Done()
-		host := "127.0.0.1:3426"
-		if u, err := url.Parse(mcpURL); err == nil && u.Host != "" {
-			host = u.Host
-		}
-		if conn, err := net.DialTimeout("tcp", host, 1500*time.Millisecond); err == nil {
-			conn.Close()
-			a.MCPUp = true
-		} else {
-			a.MCPErr = shortErr(err)
-		}
+		a.MCPUp, a.MCPName, a.MCPErr = probeMCP(mcpURL)
 	}()
 	a.Magpie = findMagpie(tsURL)
 	if a.Magpie.ProviderID != "" {

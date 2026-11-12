@@ -127,7 +127,7 @@ func (a *App) idleCard(c *ui.Context, p Palette) {
 }
 
 func (a *App) urlsCard(c *ui.Context, p Palette) {
-	card(c, p, 4, "接入地址", "网页对话与 API 走 Tailscale Service；MCP 小说桥在本机", nil, func() {
+	card(c, p, 4, "接入地址", "网页对话与 API 走 Tailscale Service；MCP 桥在本机", nil, func() {
 		field := func(label, key, hint string, v *string) {
 			ui.Column(c).Gap(6).Children(func() {
 				ui.Text(c, label).FontSize(12).TextColor(p.Text3)
@@ -135,14 +135,14 @@ func (a *App) urlsCard(c *ui.Context, p Palette) {
 			})
 		}
 		field("Tailscale Service 地址", "ts", "http://qwen.<tailnet>.ts.net:443", &a.tsURL)
-		field("本机 MCP 小说桥", "mcp", "http://127.0.0.1:3426", &a.mcpURL)
-		field("工作文件夹", "root", `C:\Users\…\Documents\Colab创作`, &a.novelRoot)
+		field("本机 MCP 桥", "mcp", "http://127.0.0.1:3426", &a.mcpURL)
+		field("工作目录", "root", `C:\Users\…\Documents\Colab创作`, &a.novelRoot)
 		ui.Row(c).Gap(8).Children(func() {
 			outlineButton(c.Key("save-urls"), p, "保存").OnClick(func() {
 				a.saveAccessURLs()
 				a.flash("已保存接入地址")
 			})
-			outlineButton(c.Key("open-root"), p, "打开工作文件夹").OnClick(func() { a.openFolder(a.novelRoot) })
+			outlineButton(c.Key("open-root"), p, "打开工作目录").OnClick(func() { a.openFolder(a.novelRoot) })
 		})
 	})
 }

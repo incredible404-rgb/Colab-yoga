@@ -23,6 +23,7 @@ func TestReadmeFrames(t *testing.T) {
 	a := fakeApp(t)
 	st, llm := *a.status, *a.status.LLM
 	stateIdle(a)
+	a.access.MCPUp = false
 	base := time.Now()
 	var passed time.Duration
 	a.now = func() time.Time { return base.Add(passed) }
@@ -47,6 +48,17 @@ func TestReadmeFrames(t *testing.T) {
 	}
 
 	play(900*time.Millisecond, 1)
+	tt.Scroll(800, 550, 0, 700)
+	play(600*time.Millisecond, 1)
+	if err := tt.Click("启动"); err != nil {
+		t.Fatal(err)
+	}
+	play(800*time.Millisecond, 1)
+	a.access.MCPUp = true
+	a.finishMCPStart(mcpStart{OK: true, State: "started"})
+	play(700*time.Millisecond, 1)
+	tt.Scroll(800, 350, 0, -1200)
+	play(600*time.Millisecond, 1)
 	if err := tt.Click("唤醒 G4"); err != nil {
 		t.Fatal(err)
 	}

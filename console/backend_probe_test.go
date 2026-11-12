@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -33,6 +34,64 @@ func TestProbeLlamaAsksModelsAndSlotsTogether(t *testing.T) {
 	}
 	if took >= 3*lag-50*time.Millisecond {
 		t.Errorf("probe took %v: models and slots should be asked together", took)
+	}
+}
+
+// The local MCP counts as up only when /health identifies it. A listening port proves
+// nothing, so a foreign HTTP listener on the same port must not turn the card green.
+func TestProbeMCPNeedsTheServiceToIdentifyItself(t *testing.T) {
+	serve := func(status int, body string) string {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/health" {
+				http.NotFound(w, r)
+				return
+			}
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
+		}))
+		t.Cleanup(srv.Close)
+		return srv.URL
+	}
+
+	for _, c := range []struct {
+		label, body string
+	}{
+		{"server field", `{"ok":true,"server":"local_mcp"}`},
+		{"older name field", `{"ok":true,"name":"local_mcp"}`},
+	} {
+		up, name, errText := probeMCP(serve(200, c.body))
+		if !up || name != "local_mcp" || errText != "" {
+			t.Errorf("%s: up=%v name=%q err=%q", c.label, up, name, errText)
+		}
+	}
+
+	for _, c := range []struct {
+		label, body string
+		status      int
+		wantErr     string
+	}{
+		{"foreign service", `{"ok":true,"server":"ollama"}`, 200, "其他服务"},
+		{"foreign html listener", `<html>hi</html>`, 200, "没报出服务名"},
+		{"no identity", `{"ok":true}`, 200, "没报出服务名"},
+		{"not ready", `{"ok":false,"server":"local_mcp"}`, 200, "未就绪"},
+		{"old version without /health", `not found`, 404, "旧版本机 MCP"},
+	} {
+		up, _, errText := probeMCP(serve(c.status, c.body))
+		if up {
+			t.Errorf("%s: counted as the local MCP", c.label)
+		}
+		if !strings.Contains(errText, c.wantErr) {
+			t.Errorf("%s: err %q lacks %q", c.label, errText, c.wantErr)
+		}
+	}
+}
+
+func TestProbeMCPWithoutAListenerIsDown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	url := srv.URL
+	srv.Close() // nothing listens there now
+	if up, _, errText := probeMCP(url); up || errText == "" {
+		t.Errorf("a closed port: up=%v err=%q", up, errText)
 	}
 }
 

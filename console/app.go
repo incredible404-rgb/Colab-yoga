@@ -65,6 +65,8 @@ type App struct {
 	logsOpen          bool
 	logsAlert         bool
 	waking            bool
+	mcpStarting       bool      // a manual start of the local MCP is in flight
+	mcpStartErr       string    // why the last manual start failed; cleared by the next start or a success
 	wakeAt            time.Time // when the wake in flight began
 	redeploying       bool      // the wake in flight reuses a runtime that was already assigned
 	wakeStage         int       // index into wakeStages
@@ -484,6 +486,36 @@ func (a *App) refreshAccess() {
 		a.access = acc
 		a.reloadCatalog() // a runners file exported while the console runs shows up here
 	})
+}
+
+// startMCP starts the local MCP by hand, from its card. The bridge's mcp_start runs in the
+// background and wakes no GPU; a click while one start is still running does nothing.
+func (a *App) startMCP() {
+	if a.mcpStarting {
+		return
+	}
+	if _, busy := a.inflight.Load("mcp-start"); busy {
+		return
+	}
+	a.mcpStarting, a.mcpStartErr = true, ""
+	a.once("mcp-start", func() {
+		m, err := a.bridge.RunJSON(mcpStartTimeout, "mcp_start")
+		res := readMCPStart(m, err)
+		a.refreshAccess()
+		a.apply(func() { a.finishMCPStart(res) })
+	})
+}
+
+// finishMCPStart applies one start's outcome to the card and the log.
+func (a *App) finishMCPStart(res mcpStart) {
+	a.mcpStarting = false
+	if res.OK {
+		a.mcpStartErr = ""
+		a.flash("本机 MCP 桥已启动")
+		return
+	}
+	a.mcpStartErr = res.Error
+	a.logf("本机 MCP 桥没能启动：%s", res.Error)
 }
 
 func (a *App) ensureKeeper() {

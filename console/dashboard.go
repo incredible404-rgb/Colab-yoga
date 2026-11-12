@@ -381,7 +381,7 @@ func (a *App) modelCard(c *ui.Context, p Palette) ui.Element {
 				metricRoll(c, p, "推理槽位", slots, "", 16, p.Text, numeric)
 				metric(c, p, "最近一次推理", last, "", 16, p.Text)
 				mcpText, mcpCol := a.mcpSummary(p)
-				metric(c, p, "小说 MCP", mcpText, "", 16, mcpCol)
+				metric(c, p, "本机 MCP", mcpText, "", 16, mcpCol)
 			})
 		}
 		// Loading the first model and opening the chat are steps of the top bar; what is
@@ -541,11 +541,32 @@ type wayIn struct {
 	title, value, note string
 	state              string // ok | warn | down | idle
 	actions            []action
+	manual             *manualStart // the card's own fallback button, when it has one
 }
 
 type action struct {
 	label string
 	run   func()
+}
+
+// manualStart is a way in's fallback: it does the thing by hand when the normal route is
+// down, and while it runs it is busy and cannot be clicked again.
+type manualStart struct {
+	label string
+	busy  bool
+	run   func()
+}
+
+// mcpManual is the MCP card's fallback. It starts the local server with or without a GPU.
+func (a *App) mcpManual() *manualStart {
+	m := &manualStart{label: "启动", busy: a.mcpStarting, run: a.startMCP}
+	switch {
+	case a.mcpStarting:
+		m.label = "启动中"
+	case a.mcpStartErr != "":
+		m.label = "重试"
+	}
+	return m
 }
 
 func (a *App) accessCard(c *ui.Context, p Palette) {
@@ -622,20 +643,29 @@ func (a *App) waysIn() []wayIn {
 	}
 
 	mcpText, _ := a.mcpSummary(darkPalette)
-	mcp := wayIn{title: "MCP 小说桥", value: a.novelRoot, actions: []action{{"打开文件夹", func() { a.openFolder(a.novelRoot) }}}}
+	mcp := wayIn{title: "MCP 桥", value: a.novelRoot, actions: []action{{"打开文件夹", func() { a.openFolder(a.novelRoot) }}}}
 	switch {
 	case checking:
 		mcp.state, mcp.note = "idle", "检测中…"
 	case !acc.MCPUp && a.noRuntime():
-		mcp.state, mcp.note = "idle", "本机 MCP 服务（local_novel_mcp.py）没在运行；要用小说目录工具时再启动。"
+		mcp.state, mcp.note = "idle", "本机 MCP 没在运行："+acc.MCPErr+"；需要时可以手动启动。"
 	case !acc.MCPUp:
-		mcp.state, mcp.note = "down", "本机 MCP 服务（local_novel_mcp.py）没在运行，网页里的小说目录工具会报错。"
+		mcp.state, mcp.note = "down", "本机 MCP 没在运行："+acc.MCPErr+"；网页里的本机工具暂时不可用。"
 	case mcpText == "已连通":
-		mcp.state, mcp.note = "ok", "云端模型可以读写这个工作文件夹；在网页输入框的工具开关里打开 local_novel_fs。"
+		mcp.state, mcp.note = "ok", "本机工具已连通，默认工作目录见上方。"
 	case mcpText == "云端转发没起" || mcpText == "云端连不到本机":
 		mcp.state, mcp.note = "down", mcpText+"：服务端会在 15 秒内自动补上转发；仍不通就检查本机 Tailscale。"
 	default:
-		mcp.state, mcp.note = "ok", "本机服务在监听；云端模型跑起来后会核对云端到本机的隧道。"
+		mcp.state, mcp.note = "ok", "本机 MCP 已就绪；模型运行后会检查云端到本机的连接。"
+	}
+	if !checking && !acc.MCPUp {
+		mcp.manual = a.mcpManual()
+		switch {
+		case a.mcpStarting:
+			mcp.note = "正在启动本机 MCP 桥…"
+		case a.mcpStartErr != "":
+			mcp.note = "手动启动没成功：" + a.mcpStartErr
+		}
 	}
 	return []wayIn{web, mag, apiW, mcp}
 }
@@ -656,6 +686,13 @@ func (a *App) wayRow(c *ui.Context, p Palette, w wayIn) {
 				Grow(1).Shrink(1).MinWidth(40).Tooltip(w.value)
 			for _, act := range w.actions {
 				outlineButton(c.Key(w.title+act.label), p, act.label).Padding(4, 12).FontSize(12).OnClick(act.run)
+			}
+			if m := w.manual; m != nil {
+				if m.busy {
+					busyButton(c.Key(w.title+"manual"), p, m.label).Padding(4, 12).FontSize(12)
+				} else {
+					outlineButton(c.Key(w.title+"manual"), p, m.label).Padding(4, 12).FontSize(12).OnClick(m.run)
+				}
 			}
 		})
 		// A way in that works needs no sentence: its note waits under the pointer.

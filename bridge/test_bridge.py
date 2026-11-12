@@ -99,6 +99,7 @@ class WakeReuseTests(unittest.TestCase):
             return True
 
         patch(cb, "spawn_keeper", spawn)
+        patch(cb, "local_mcp_script_path", lambda: None)
         self._out = io.StringIO()
         self._redirect = contextlib.redirect_stdout(self._out)
 
@@ -635,6 +636,7 @@ class KeeperLoopTests(unittest.TestCase):
         patch(cb, "_exec_on_session", exec_on)
         patch(cb, "_tfe_keep_alive", lambda endpoint: None)
         patch(cb, "state", types.SimpleNamespace(store=types.SimpleNamespace(add=lambda s: None)))
+        patch(cb, "local_mcp_script_path", lambda: None)
         patch(cb.time, "time", lambda: self.now)
         patch(cb.time, "sleep", sleep)
 
@@ -733,6 +735,298 @@ class EnsureKeeperTests(unittest.TestCase):
         self.assertEqual(len(flags_seen), 2)
         self.assertTrue(flags_seen[0] & 0x01000000)
         self.assertFalse(flags_seen[1] & 0x01000000)
+
+
+class LocalMcpTests(unittest.TestCase):
+    """The local MCP is started by wake, kept up while a session is live (keeper) and stopped
+    when the last session is released, all through the helper script. Without a helper it is
+    an optional part: nothing is printed and nothing fails."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.log = self.tmp / "helper.log"
+        self.script = None
+        self.now = 1_000_000.0
+        self.release_at = float("inf")
+        self.extra_assignments = []
+        self.settle_checks = True  # each fake sleep waits for in-flight checks, so beats are deterministic
+        self.on_sleep = lambda now: None
+        self.real_find = getattr(cb, "local_mcp_script_path", None)
+        self._saved = {}
+
+        def sleep(sec):
+            self.now += sec
+            self.on_sleep(self.now)
+            if self.settle_checks:
+                self._join_checks()
+
+        def sync(with_status=False):
+            assigns = [types.SimpleNamespace(endpoint="vm1", runtime_proxy_info=types.SimpleNamespace(
+                token="t", url="u", expires_at=lambda: None))] if self.now < self.release_at else []
+            return {"easycolab": self.sess}, assigns + self.extra_assignments, True
+
+        def exec_on(s, code, timeout=40):
+            payload = {"url": "https://x", "app_alive": True, "idle_remaining": 900,
+                       "idle_timeout": 30, "llm_online": True}
+            return [{"text": "EC_KEEPER:" + json.dumps(payload)}]
+
+        self.sess = types.SimpleNamespace(name="easycolab", endpoint="vm1", token="", url="", token_expires_at=None)
+        self._patch(cb, "keeper_state_path", lambda: str(self.tmp / "keeper.json"))
+        self._patch(cb, "_has_valid_token", lambda: True)
+        self._patch(cb, "_safe_sync_sessions", sync)
+        self._patch(cb, "_track_a_covers", lambda endpoint: False)
+        self._patch(cb, "_exec_on_session", exec_on)
+        self._patch(cb, "_tfe_keep_alive", lambda endpoint: None)
+        self._patch(cb, "state", types.SimpleNamespace(store=types.SimpleNamespace(add=lambda s: None)))
+        self._patch(cb, "ledger_poll", lambda endpoint="": None)
+        self._patch(cb, "save_server_token", lambda token: None)
+        self._patch(cb, "ensure_keeper", lambda: "running")
+        self._patch(cb, "local_mcp_script_path", lambda: self.script)
+        self._patch(cb.time, "time", lambda: self.now)
+        self._patch(cb.time, "sleep", sleep)
+
+    def tearDown(self) -> None:
+        for (obj, name), val in reversed(list(self._saved.items())):
+            setattr(obj, name, val)
+
+    def _patch(self, obj, name, val) -> None:
+        self._saved[(obj, name)] = getattr(obj, name, None)
+        setattr(obj, name, val)
+
+    def _helper(self, reply: dict, exit_code: int = 0) -> str:
+        """A stand-in helper: records its action in self.log and prints `reply` as its last line."""
+        reply_file = self.tmp / "reply.json"
+        reply_file.write_text(json.dumps(reply), encoding="utf-8")
+        path = self.tmp / "helper" / "local_mcp.py"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(
+            "import sys\n"
+            f"with open({str(self.log)!r}, 'a', encoding='utf-8') as f: f.write(sys.argv[1] + '\\n')\n"
+            "print('helper chatter')\n"
+            f"print(open({str(reply_file)!r}, encoding='utf-8').read())\n"
+            f"sys.exit({exit_code})\n",
+            encoding="utf-8")
+        return str(path)
+
+    def _actions(self) -> list:
+        return self.log.read_text(encoding="utf-8").split() if self.log.exists() else []
+
+    def _join_checks(self) -> None:
+        for t in threading.enumerate():
+            if t is not threading.current_thread():
+                t.join(30)
+
+    def test_wake_starts_the_local_mcp_and_says_so(self) -> None:
+        self.script = self._helper({"ok": True, "started": True, "pid": 7,
+                                   "url": "http://127.0.0.1:3426/mcp", "token_file": "t"})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cb._on_wake_url("tok")
+        self.assertEqual(self._actions(), ["start"])
+        self.assertIn("已启动本机 MCP", out.getvalue())
+
+    def test_wake_without_a_helper_is_silent_and_runs_no_helper(self) -> None:
+        self.script = None
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cb._on_wake_url("tok")
+        self.assertNotIn("MCP", out.getvalue())
+        self.assertEqual(self._actions(), [])
+
+    def test_failed_start_is_reported_with_its_reason_and_never_leaks_the_token(self) -> None:
+        self.script = self._helper({"ok": False, "error": "port 3426 is held by another program",
+                                   "token": "sekret-123"}, exit_code=1)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cb._on_wake_url("tok")  # the GPU side still succeeds: no exception
+        text = out.getvalue()
+        self.assertIn("本机 MCP 桥没能启动", text)
+        self.assertIn("port 3426 is held by another program", text)
+        self.assertNotIn("sekret-123", text)
+        self.assertEqual(cb.ensure_local_mcp()["state"], "failed")
+
+    def test_start_states_follow_the_helper_reply(self) -> None:
+        self.script = self._helper({"ok": True, "started": False, "pid": 7})
+        self.assertEqual(cb.ensure_local_mcp()["state"], "running")
+        self.script = self._helper({"unexpected": True})  # no ok: never counted as started
+        self.assertEqual(cb.ensure_local_mcp()["state"], "failed")
+
+    def test_helper_is_found_by_env_then_install_config_then_the_skills(self) -> None:
+        find = self.real_find
+        install = self.tmp / "app"
+        install.mkdir()
+        home = self.tmp / "home"
+
+        def touch(path: Path) -> str:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("", encoding="utf-8")
+            return os.path.abspath(path)
+
+        skill = Path("skills") / "colab-gpu-llm-service" / "scripts" / "local_mcp.py"
+        self.assertIsNone(find(str(install), {}, str(self.tmp / "empty")))
+        claude = touch(home / ".claude" / skill)
+        self.assertEqual(find(str(install), {}, str(home)), claude)
+        agents = touch(home / ".agents" / skill)
+        self.assertEqual(find(str(install), {}, str(home)), agents)
+        configured = touch(self.tmp / "configured" / "mcp.py")
+        (install / "local_mcp_bridge.json").write_text(json.dumps({"script": configured}), encoding="utf-8")
+        self.assertEqual(find(str(install), {}, str(home)), configured)
+        from_env = touch(self.tmp / "env" / "mcp.py")
+        self.assertEqual(find(str(install), {"COLAB_LOCAL_MCP_SCRIPT": from_env}, str(home)), from_env)
+        missing = str(self.tmp / "gone.py")
+        self.assertEqual(find(str(install), {"COLAB_LOCAL_MCP_SCRIPT": missing}, str(home)), configured)
+
+    def test_keeper_keeps_the_local_mcp_up_while_a_session_is_live(self) -> None:
+        self.script = self._helper({"ok": True, "started": False, "pid": 7})
+        self.release_at = self.now + 600
+        cb.cmd_keeper()
+        self._join_checks()
+        actions = self._actions()
+        self.assertEqual(actions[-1], "stop")  # the release at the end stops it
+        self.assertGreaterEqual(actions.count("start"), 9)  # about one check a minute, not one per beat
+        self.assertLessEqual(actions.count("start"), 11)
+
+    def test_keeper_without_a_live_session_never_starts_the_local_mcp(self) -> None:
+        self.script = self._helper({"ok": True, "started": False, "pid": 7})
+        self.release_at = self.now  # no assignment from the first look
+        cb.cmd_keeper()
+        self._join_checks()
+        self.assertEqual(self._actions(), ["stop"])
+
+    def test_releasing_one_session_keeps_mcp_for_another_assignment(self) -> None:
+        self.script = self._helper({"ok": True, "started": False, "pid": 7})
+        self.extra_assignments = [types.SimpleNamespace(endpoint="other-vm")]
+        cb.state.client = types.SimpleNamespace(unassign=lambda ep: None)
+        cb.state.prune_session = lambda name: None
+        self._patch(cb, "keeper_decide", lambda *args: "release")
+        cb.cmd_keeper()
+        self.assertNotIn("stop", self._actions())
+
+    def test_a_failed_release_does_not_stop_mcp_for_a_live_assignment(self) -> None:
+        self.script = self._helper({"ok": True, "started": False, "pid": 7})
+        def fail(ep):
+            raise RuntimeError("release failed")
+        cb.state.client = types.SimpleNamespace(unassign=fail)
+        self._patch(cb, "keeper_decide", lambda *args: "release")
+        cb.cmd_keeper()
+        self.assertNotIn("stop", self._actions())
+
+    def test_a_slow_check_is_not_stacked_and_does_not_stall_the_beats(self) -> None:
+        release = threading.Event()
+        calls = []
+
+        def slow_ensure():
+            calls.append(1)
+            release.wait(30)
+            return {"state": "running", "error": ""}
+
+        self._patch(cb, "ensure_local_mcp", slow_ensure)
+        self.settle_checks = False
+        self.release_at = self.now + 300
+        # Free the blocked check only at the keeper's next assignment sync after the release (120 s cadence).
+        self.on_sleep = lambda now: release.set() if now >= self.release_at + 60 else None
+        cb.cmd_keeper()
+        self._join_checks()
+        self.assertEqual(len(calls), 1)
+        self.assertGreaterEqual(json.loads((self.tmp / "keeper.json").read_text(encoding="utf-8"))["beats"], 9)
+
+    def test_stop_only_asks_the_helper_and_never_kills_by_port(self) -> None:
+        self.script = self._helper({"ok": True, "started": False, "pid": 7})
+        commands = []
+        real_run = cb.subprocess.run
+
+        def record(cmd, *args, **kwargs):
+            commands.append(list(cmd))
+            return real_run(cmd, *args, **kwargs)
+
+        self._patch(cb.subprocess, "run", record)
+        cb.stop_local_mcp()
+        self.assertEqual(commands, [[cb._local_mcp_python(), "-X", "utf8", self.script, "stop"]])
+        self.assertEqual(self._actions(), ["stop"])
+
+
+class McpStartCommandTests(unittest.TestCase):
+    """mcp_start is the console's manual fallback. It starts the local MCP and nothing else: it
+    works with no GPU running and must never wake or keep one."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.log = self.tmp / "helper.log"
+        self.script = None
+        self._saved = {}
+
+        def no_gpu(*args, **kwargs):
+            raise AssertionError("mcp_start must not wake or keep a GPU")
+
+        self._patch(cb, "local_mcp_script_path", lambda: self.script)
+        self.status_reply = {"ok": True, "running": True, "pid": 7}
+        real_run = cb.run_local_mcp
+
+        def run_local_mcp(action):
+            return self.status_reply if action == "status" else real_run(action)
+
+        self._patch(cb, "run_local_mcp", run_local_mcp)
+        self._patch(cb, "cmd_wake", no_gpu)
+        self._patch(cb, "ensure_keeper", no_gpu)
+        self._patch(cb, "spawn_keeper", no_gpu)
+
+    def tearDown(self) -> None:
+        for (obj, name), val in reversed(list(self._saved.items())):
+            setattr(obj, name, val)
+
+    def _patch(self, obj, name, val) -> None:
+        self._saved[(obj, name)] = getattr(obj, name, None)
+        setattr(obj, name, val)
+
+    def _helper(self, reply: dict, exit_code: int = 0) -> str:
+        reply_file = self.tmp / "reply.json"
+        reply_file.write_text(json.dumps(reply), encoding="utf-8")
+        path = self.tmp / "helper" / "local_mcp.py"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(
+            "import sys\n"
+            f"with open({str(self.log)!r}, 'a', encoding='utf-8') as f: f.write(sys.argv[1] + '\\n')\n"
+            "print('helper chatter')\n"
+            f"print(open({str(reply_file)!r}, encoding='utf-8').read())\n"
+            f"sys.exit({exit_code})\n",
+            encoding="utf-8")
+        return str(path)
+
+    def _run(self) -> dict:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cb.main(["mcp_start"])
+        return json.loads(out.getvalue().strip().splitlines()[-1])
+
+    def test_started_and_already_running_are_both_ok(self) -> None:
+        self.script = self._helper({"ok": True, "started": True, "pid": 7})
+        self.assertEqual(self._run(), {"ok": True, "state": "started", "error": ""})
+        self.script = self._helper({"ok": True, "started": False, "pid": 7})
+        self.assertEqual(self._run(), {"ok": True, "state": "running", "error": ""})
+
+    def test_failure_carries_the_reason_and_never_the_token(self) -> None:
+        self.script = self._helper({"ok": False, "error": "端口 3426 被其他程序占用", "token": "sekret-9"},
+                                  exit_code=1)
+        result = self._run()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["state"], "failed")
+        self.assertIn("端口 3426 被其他程序占用", result["error"])
+        self.assertNotIn("sekret-9", json.dumps(result))
+
+    def test_a_start_the_status_does_not_confirm_is_a_failure(self) -> None:
+        self.script = self._helper({"ok": True, "started": True, "pid": 7})
+        self.status_reply = {"ok": True, "running": False}
+        result = self._run()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["state"], "failed")
+        self.assertIn("状态检查", result["error"])
+
+    def test_no_helper_says_what_to_install(self) -> None:
+        self.script = None
+        result = self._run()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["state"], "absent")
+        self.assertIn("local_mcp.py", result["error"])
 
 
 class ServerTokenTests(unittest.TestCase):
@@ -1054,6 +1348,7 @@ class KeeperLedgerTests(unittest.TestCase):
             store=types.SimpleNamespace(add=lambda s: None),
             client=types.SimpleNamespace(get_consumption_user_info=info, unassign=lambda ep: None),
             prune_session=lambda name: None))
+        patch(cb, "local_mcp_script_path", lambda: None)
         patch(cb.time, "time", lambda: self.now)
         patch(cb.time, "sleep", sleep)
 

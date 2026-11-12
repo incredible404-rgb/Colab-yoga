@@ -22,13 +22,13 @@ type fixtureRunner struct {
 	FQDN      string
 }
 
-const fakeSecret = "sk-FAKE-SECRET-NOT-REAL"
+const fakeSecret = "test-only-runner-secret"
 
 var shippedRunners = []fixtureRunner{
-	{"qwen38-huihui-v2", "Huihui-Qwen3.8-Flash-Next-abliterated-v2-UD-Q4_K_XL", []int64{100_000_000_000, 15_000_000_000}, "qwen.tailabc123.ts.net"},
-	{"gemma4-31b", "Gemma-4-31B-it-ARA-Heretic-Q8_0", []int64{34_800_000_000}, "qwen.tailabc123.ts.net"},
-	{"qwen38-27b-rvn", "Qwen3.8-27B-RVN-Heretic-BF16", []int64{56_100_000_000}, "qwen.tailabc123.ts.net"},
-	{"glm53-flash", "GLM-5.3-Flash-Uncensored-GSQ-RCO-Q4", []int64{138_200_000_000}, "qwen.tailabc123.ts.net"},
+	{"qwen38-huihui-v2", "Huihui-Qwen3.8-Flash-Next-abliterated-v2-UD-Q4_K_XL", []int64{100_000_000_000, 15_000_000_000}, "qwen.fixture.ts.net"},
+	{"gemma4-31b", "Gemma-4-31B-it-ARA-Heretic-Q8_0", []int64{34_800_000_000}, "qwen.fixture.ts.net"},
+	{"qwen38-27b-rvn", "Qwen3.8-27B-RVN-Heretic-BF16", []int64{56_100_000_000}, "qwen.fixture.ts.net"},
+	{"glm53-flash", "GLM-5.3-Flash-Uncensored-GSQ-RCO-Q4", []int64{138_200_000_000}, "qwen.fixture.ts.net"},
 }
 
 // writeRunners writes a runners file with the entries in this order and returns its path.
@@ -116,7 +116,7 @@ func TestOddRunnersFiles(t *testing.T) {
 func TestTailnetHostFromTheRunners(t *testing.T) {
 	dir := t.TempDir()
 	p := Paths{Runners: []string{writeRunners(t, dir, shippedRunners)}}
-	if got := defaultTailscaleURL(p); got != "http://qwen.tailabc123.ts.net:443" {
+	if got := defaultTailscaleURL(p); got != "http://qwen.fixture.ts.net:443" {
 		t.Errorf("SERVICE_FQDN: %q", got)
 	}
 	// No SERVICE_FQDN line: any *.ts.net host in the scripts will do, not only *.tailNNN.ts.net.
@@ -147,7 +147,7 @@ func TestAccessAddressFromRunnersFillsOnlyAnEmptyOne(t *testing.T) {
 		t.Fatalf("setup: %q", a.tsURL)
 	}
 	b := newApp(a.paths)
-	if b.tsURL != "http://qwen.tailabc123.ts.net:443" {
+	if b.tsURL != "http://qwen.fixture.ts.net:443" {
 		t.Errorf("a new console takes the host the runners name: %q", b.tsURL)
 	}
 	_ = b.set.Set(map[string]any{"accessTailscaleURL": "http://typed.by.user.ts.net:443"})
