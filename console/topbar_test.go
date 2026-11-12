@@ -681,3 +681,28 @@ func TestSignInCanBePassedBy(t *testing.T) {
 		t.Errorf("cancelling goes back to the console, not to the sign-in page; texts %q", tt.Texts())
 	}
 }
+
+// TestArrivalDoesNotFade: what arrives is opaque from the first frame, and only moves.
+// On the GPU an area whose opacity animates flickers (see arrive); the renderer here is
+// the software one, which cannot show that, so this holds the cause off instead.
+func TestArrivalDoesNotFade(t *testing.T) {
+	a := fakeApp(t)
+	ref := ui.NewTesterWith(a.view, 1440, 900, ui.TesterOptions{Dark: true})
+	ref.Advance(3 * time.Second)
+	title, ok := ref.Find("当前模型")
+	if !ok {
+		t.Fatal("no model card")
+	}
+	x, y := int(title.X)-12, int(title.Y)+60 // in the card's left padding, clear of its text and of its rise
+	card := darkPalette.Card
+	if c := ref.Image().RGBAAt(x, y); c.R != card.R || c.G != card.G || c.B != card.B {
+		t.Fatalf("the probe is not on the card's face at rest: #%02X%02X%02X", c.R, c.G, c.B)
+	}
+	tt := ui.NewTesterWith(a.view, 1440, 900, ui.TesterOptions{Dark: true})
+	for ms := 0; ms <= 900; ms += 8 {
+		if c := tt.Image().RGBAAt(x, y); c.R != card.R || c.G != card.G || c.B != card.B {
+			t.Fatalf("%d ms after the window opened the card's face is #%02X%02X%02X, not the card's color: it is fading in", ms, c.R, c.G, c.B)
+		}
+		tt.Advance(8 * time.Millisecond)
+	}
+}

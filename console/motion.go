@@ -71,8 +71,13 @@ var (
 // stagger is the delay between siblings arriving one after another.
 const stagger = 55 * time.Millisecond
 
-// arrive brings e in once, the first time it is built: lowered, a touch smaller and
-// transparent, it rises into place on a spring, delay after the frame it appeared in.
+// arrive brings e in once, the first time it is built: lowered and a touch smaller, it
+// rises into place on a spring, delay after the frame it appeared in. It does not fade
+// in. On the GPU (MyGo 0.8.3, Direct3D 11) an area whose opacity animates flickers:
+// recorded off a 120 Hz screen, 10 to 24 frames of a window's first second showed a
+// whole card a step brighter or darker than the frames on both sides of it, plain to
+// see on the dark theme; with the fade left out, none. The software renderer the tests
+// draw with does not do it, so only a recording of the real window can tell.
 // When hover is true it then lifts a little under the pointer. Both are poses, which
 // only repaint: a staggered page coming in never runs the view frame by frame.
 func arrive(c *ui.Context, e ui.Element, delay time.Duration, hover bool) ui.Element {
@@ -82,7 +87,7 @@ func arrive(c *ui.Context, e ui.Element, delay time.Duration, hover bool) ui.Ele
 	pose, a := ui.Pose{}, springLift
 	switch {
 	case c.Now().Equal(*born):
-		pose = ui.Pose{Y: 18, Scale: 0.985, Fade: 1}
+		pose = ui.Pose{Y: 18, Scale: 0.985}
 		c.Invalidate() // the next build poses it at rest, and the spring takes it there
 	case c.Now().Sub(*born) < delay+springEnter.Spring.Duration:
 		a = springEnter
