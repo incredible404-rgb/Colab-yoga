@@ -743,6 +743,8 @@ MCP_BRIDGE_STATE: Dict[str, Any] = {
 MCP_BRIDGE_PATH = "/content/colab_yoga_mcp_bridge.py"
 MCP_BRIDGE_LOG = "/content/colab_yoga_mcp_bridge.log"
 _MCP_TARGET_RE = re.compile(r"inet_aton\(\"([0-9.]+)\"\)\s*\+\s*struct\.pack\('>H',\s*(\d+)\)")
+_MCP_VAR_IP_RE = re.compile(r"""LOCAL_MCP_IP\s*=\s*["']([0-9.]+)["']""")
+_MCP_VAR_PORT_RE = re.compile(r"""inet_aton\(LOCAL_MCP_IP\)\s*\+\s*struct\.pack\(['"]>H['"],\s*(\d+)\)""")
 _MCP_SOCKS_RE = re.compile(r"--socks5-server=localhost:(\d+)")
 
 MCP_BRIDGE_SCRIPT = r'''"""Colab-yoga MCP forwarder: 127.0.0.1:<port> -> tailscaled SOCKS5 -> <pc_ip>:<port>.
@@ -919,6 +921,11 @@ def _parse_mcp_target() -> Optional[Tuple[str, int, int]]:
         if m:
             s = _MCP_SOCKS_RE.search(code)
             return m.group(1), int(m.group(2)), int(s.group(1)) if s else 1055
+        ip_m = _MCP_VAR_IP_RE.search(code)
+        port_m = _MCP_VAR_PORT_RE.search(code) if ip_m else None
+        if ip_m and port_m:
+            s = _MCP_SOCKS_RE.search(code)
+            return ip_m.group(1), int(port_m.group(1)), int(s.group(1)) if s else 1055
     return None
 
 
@@ -991,6 +998,9 @@ def _mcp_bridge_selftest() -> None:
 
 def get_mcp_bridge_status() -> Dict[str, Any]:
     st = {k: MCP_BRIDGE_STATE[k] for k in ("listening", "owner", "reachable", "error")}
+    # The same target _ensure_mcp_bridge forwards to: without one (no local_tailscale_ip in the
+    # runners) nothing is forwarded, which is a choice, not a fault.
+    st["configured"] = bool(_kernel_mcp_target())
     checked = float(MCP_BRIDGE_STATE["checked_ts"] or 0.0)
     st["checked_age_s"] = int(time.time() - checked) if checked > 0 else -1
     return st

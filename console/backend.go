@@ -38,9 +38,9 @@ type Paths struct {
 	Keeper    string
 	Ledger    string // the official balance as the keeper samples it (colab_yoga_bridge.py ledger_observe)
 	Token     string // the server's control token, written by the bridge (wake, discover_url)
-	// Runner scripts with real keys, exported by colab-gpu-llm-service's colab_kernel.py:
-	// next to the install first, then the standard install (for a package unzipped
-	// elsewhere). Never part of a release package. The first that exists is used.
+	// Runner scripts with real keys, exported by colab-gpu-llm-service's colab_kernel.py.
+	// Never part of a release package. The first that exists is used; the order matches
+	// resolve_runners_path in bridge/colab_yoga_bridge.py.
 	Runners []string
 }
 
@@ -79,11 +79,61 @@ func pathsFor(local, appDir string) Paths {
 		Keeper:    filepath.Join(cfg, "keeper.json"),
 		Ledger:    filepath.Join(cfg, "ledger.json"),
 		Token:     filepath.Join(cfg, "server_token.json"),
-		Runners: []string{
-			filepath.Join(appDir, "colab_kernel_runners.json"),
-			filepath.Join(local, "Programs", "Colab-yoga", "colab_kernel_runners.json"),
-		},
+		Runners:   runnersCandidates(local, appDir, cfg),
 	}
+}
+
+// runnersCandidates: $COLAB_YOGA_RUNNERS, $COLAB_YOGA_DIR, next to the exe, the config
+// dir (where colab_kernel.py writes it by default, so an unzipped package finds it
+// anywhere), then the standard install. runnersFile takes the first that exists.
+func runnersCandidates(local, appDir, cfg string) []string {
+	const name = "colab_kernel_runners.json"
+	var out []string
+	if f := os.Getenv("COLAB_YOGA_RUNNERS"); f != "" {
+		out = append(out, f)
+	}
+	if d := os.Getenv("COLAB_YOGA_DIR"); d != "" {
+		out = append(out, filepath.Join(d, name))
+	}
+	return append(out,
+		filepath.Join(appDir, name),
+		filepath.Join(cfg, name),
+		filepath.Join(local, "Programs", "Colab-yoga", name),
+	)
+}
+
+// writeInstallAnchor records where this exe runs from in %LOCALAPPDATA%\Colab-yoga\install.json,
+// so colab-gpu-llm-service can find an unzipped package. Best effort: a failure is ignored.
+func writeInstallAnchor(p Paths) {
+	if p.ConfigDir == "" || p.AppDir == "" {
+		return
+	}
+	abs, err := filepath.Abs(p.AppDir)
+	if err != nil {
+		return
+	}
+	b, _ := json.MarshalIndent(map[string]string{"appDir": abs}, "", "  ")
+	if os.MkdirAll(p.ConfigDir, 0o755) == nil {
+		_ = os.WriteFile(filepath.Join(p.ConfigDir, "install.json"), append(b, '\n'), 0o644)
+	}
+}
+
+// defaultNovelRoot is the MCP card's working folder before one is set: the local MCP's own
+// cwd (~/.config/colab-cli/local-mcp.json), else ~/Documents/Colab创作 when it exists, else
+// ~/Documents.
+func defaultNovelRoot(home string) string {
+	if b, err := os.ReadFile(filepath.Join(home, ".config", "colab-cli", "local-mcp.json")); err == nil {
+		var cfg struct {
+			Cwd string `json:"cwd"`
+		}
+		if json.Unmarshal(b, &cfg) == nil && strings.TrimSpace(cfg.Cwd) != "" {
+			return cfg.Cwd
+		}
+	}
+	if d := filepath.Join(home, "Documents", "Colab创作"); fileExists(d) {
+		return d
+	}
+	return filepath.Join(home, "Documents")
 }
 
 // runnersFile is the first runner script file that exists, "" if none does.
@@ -161,10 +211,20 @@ func num(m map[string]any, key string, def float64) float64 {
 // ─── Colab-yoga server client ─────────────────────────────────────────────────
 
 type MCPBridge struct {
-	Listening bool   `json:"listening"`
-	Owner     string `json:"owner"`
-	Reachable *bool  `json:"reachable"`
-	Error     string `json:"error"`
+	Configured *bool  `json:"configured"` // nil from a server older than the field: see forwards
+	Listening  bool   `json:"listening"`
+	Owner      string `json:"owner"`
+	Reachable  *bool  `json:"reachable"`
+	Error      string `json:"error"`
+}
+
+// forwards: the server has a local_tailscale_ip to forward the MCP to. A server older than
+// the configured field only ever tried, listened, owned or failed when it had one.
+func (b *MCPBridge) forwards() bool {
+	if b.Configured != nil {
+		return *b.Configured
+	}
+	return b.Listening || b.Owner != "" || b.Error != "" || b.Reachable != nil
 }
 
 type LLMServer struct {
@@ -518,6 +578,7 @@ type LlamaProbe struct {
 type MagpieProbe struct {
 	ProviderID, ProviderName string
 	Off, Listed              bool
+	Installed                bool // a Magpie providers.json or the magpie command exists
 	GatewayUp                *bool
 	Models                   []string // the provider's model list (never its key)
 }
@@ -686,6 +747,7 @@ func findMagpie(tsURL string) MagpieProbe {
 	var out MagpieProbe
 	home, _ := os.UserHomeDir()
 	b, err := magpieProviders.read(filepath.Join(home, ".config", "magpie", "providers.json"))
+	out.Installed = err == nil
 	if err != nil || tsURL == "" {
 		return out
 	}
@@ -768,15 +830,10 @@ func magpieGatewayUp() *bool {
 		return gwState
 	}
 	gwAt = time.Now()
-	home, _ := os.UserHomeDir()
-	exe := filepath.Join(home, ".local", "bin", "magpie.exe")
-	if !fileExists(exe) {
-		if p, err := exec.LookPath("magpie"); err == nil {
-			exe = p
-		} else {
-			gwState = nil
-			return nil
-		}
+	exe := magpieExe()
+	if exe == "" {
+		gwState = nil
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
@@ -792,6 +849,18 @@ func magpieGatewayUp() *bool {
 	return gwState
 }
 
+// magpieExe is the magpie CLI: ~/.local/bin/magpie.exe, else on PATH; "" when not installed.
+func magpieExe() string {
+	home, _ := os.UserHomeDir()
+	if exe := filepath.Join(home, ".local", "bin", "magpie.exe"); fileExists(exe) {
+		return exe
+	}
+	if p, err := exec.LookPath("magpie"); err == nil {
+		return p
+	}
+	return ""
+}
+
 // probeAccess checks each way in. The checks do not depend on one another (the tailnet
 // probe, the Magpie gateway CLI, the local MCP port), so they run together and a probe
 // takes as long as the slowest rather than their sum.
@@ -805,6 +874,9 @@ func probeAccess(tsURL, mcpURL string) Access {
 		a.MCPUp, a.MCPName, a.MCPErr = probeMCP(mcpURL)
 	}()
 	a.Magpie = findMagpie(tsURL)
+	if !a.Magpie.Installed {
+		a.Magpie.Installed = magpieExe() != ""
+	}
 	if a.Magpie.ProviderID != "" {
 		a.Magpie.GatewayUp = magpieGatewayUp()
 	}

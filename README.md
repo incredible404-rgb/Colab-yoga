@@ -33,6 +33,15 @@
 
 各部分之间的约定（目录布局、API、状态字段、保活规则）见 [docs/architecture.md](docs/architecture.md)。
 
+## 从零开始（4 步跑通第一个模型）
+
+1. **登录**：解压免安装包，运行 `Colab-yoga.exe`，用 Google 账号登录。
+2. **配 Tailscale**：按 colab-gpu-llm-service 的说明配置一次 Tailscale Service，之后网页、API 和 MCP 都走这个地址。
+3. **导出模型清单**：克隆 [colab-gpu-llm-service](https://github.com/incredible404-rgb/colab-gpu-llm-service)，填好 `.secrets.json` 的 4 个必填项（`api_key`、`ts_client_id`、`ts_client_secret`、`tailnet_fqdn`），运行 `python -X utf8 scripts/colab_kernel.py --all`。它会自动写入 `%LOCALAPPDATA%\Colab-yoga\colab_kernel_runners.json`，管理台随即列出模型。
+4. **开用**：回到管理台点「唤醒 G4」，加载模型后即可网页对话，或调用 `/v1` API。
+
+不装 colab-gpu-llm-service 也能用 Colab-yoga 单独登录、唤醒、保活和释放实例，只是没有模型可加载。
+
 ## 部署
 
 两种方式，都不依赖任何别的软件的安装目录；运行时的 Python 和依赖由 Colab-yoga 自己带。
@@ -42,7 +51,7 @@
 1. 在 [Releases](https://github.com/incredible404-rgb/Colab-yoga/releases) 下载 `Colab-yoga-<版本>-windows-amd64.zip`（旁边有 `.sha256`）。
 2. 解压到任意位置，运行里面的 `Colab-yoga.exe`。不需要另外安装 Python；整个文件夹可以整体移动，但不要把 exe 单独拿出去。
 3. 设置和状态保存在 `%LOCALAPPDATA%\Colab-yoga`，不在解压目录里。免安装包不建快捷方式、不写注册表，删掉文件夹即卸载。
-4. 要看到并切换模型，需要把 `colab_kernel_runners.json`（colab-gpu-llm-service 的 `colab_kernel.py` 导出，含 API 密钥）放在 `Colab-yoga.exe` 旁边。包里不带这个文件；没有它，管理台的模型列表是空的，并提示去导出。
+4. 模型清单 `colab_kernel_runners.json`（colab-gpu-llm-service 的 `colab_kernel.py` 导出，含 API 密钥）和本机 MCP 配置 `local_mcp_bridge.json` 默认都写到 `%LOCALAPPDATA%\Colab-yoga`，管理台从那里自动读取，所以免安装包放在任意目录都不用手动拷文件；放在 `Colab-yoga.exe` 旁边的同名文件优先。包里不带这两个文件；没有模型清单时，模型列表为空并提示如何导出。
 
 ### 方式二：从源码安装
 
@@ -75,7 +84,11 @@ py -3 tools/package.py --out <仓库之外的目录>
 
 ## 本机 MCP 桥
 
-安装 [colab-gpu-llm-service](https://github.com/incredible404-rgb/colab-gpu-llm-service) 的 `scripts/local_mcp.py` 与同目录的 `local_mcp.mjs`，并准备 Node.js 和 Pi。管理台按顺序查找 `COLAB_LOCAL_MCP_SCRIPT`、安装目录 `local_mcp_bridge.json` 的 `script` 字段，以及 `~/.agents/skills/colab-gpu-llm-service/scripts/local_mcp.py`（兼容 `~/.claude/skills/`）。例如在安装目录放置：
+本机 MCP 和 Magpie 都是可选功能：没装、没配时，对应卡片只给一句安静的说明，不报错、不打扰。
+
+启用本机 MCP 需要 [colab-gpu-llm-service](https://github.com/incredible404-rgb/colab-gpu-llm-service) 的 `scripts/local_mcp.py` 与同目录的 `local_mcp.mjs`，以及 Node.js 和 Pi；云端转发还需要在模型清单里配好 `local_tailscale_ip`。本机 MCP 默认只监听 `127.0.0.1` 和配置的 `local_tailscale_ip`，不对公共局域网开放。
+
+管理台按顺序查找 `COLAB_LOCAL_MCP_SCRIPT`、exe 旁边 `local_mcp_bridge.json` 的 `script` 字段、`%LOCALAPPDATA%\Colab-yoga\local_mcp_bridge.json` 的 `script` 字段（`colab_kernel.py` 导出时自动写入），以及 `~/.agents/skills/colab-gpu-llm-service/scripts/local_mcp.py`（兼容 `~/.claude/skills/`）。一般无需手写；需要手动指定时，内容形如：
 
 ```json
 {"script": "C:/tools/colab-gpu-llm-service/scripts/local_mcp.py"}

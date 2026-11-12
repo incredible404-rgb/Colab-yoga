@@ -530,25 +530,81 @@ def _allocate_fresh_session(session_name: str, gpu_type: str) -> SessionState:
     return s
 
 
-def resolve_runners_path() -> str | None:
-    """colab_kernel_runners.json, where colab-gpu-llm-service's colab_kernel.py exports it:
-    next to this install first (<install>/), then the standard install
-    %LOCALAPPDATA%/Programs/Colab-yoga/ (for a package unzipped elsewhere). None if neither
-    has it."""
+def _local_app_data(env=None) -> str:
+    env = os.environ if env is None else env
+    return env.get("LOCALAPPDATA") or env.get("APPDATA") or os.path.expanduser("~/AppData/Local")
+
+
+def resolve_runners_path() -> str:
+    """colab_kernel_runners.json: the first existing of $COLAB_YOGA_RUNNERS,
+    $COLAB_YOGA_DIR/, next to this install (<install>/), the config dir
+    %LOCALAPPDATA%/Colab-yoga/ (where colab-gpu-llm-service's colab_kernel.py exports it by
+    default), then the standard install %LOCALAPPDATA%/Programs/Colab-yoga/. The same order
+    as runnersCandidates in console/backend.go. When none exists, the config dir's path (which
+    callers check with os.path.isfile)."""
     name = "colab_kernel_runners.json"
     install_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    local_app_data = (
-        os.environ.get("LOCALAPPDATA")
-        or os.environ.get("APPDATA")
-        or os.path.expanduser("~/AppData/Local")
-    )
-    for path in (
+    local_app_data = _local_app_data()
+    cfg_file = os.path.join(local_app_data, "Colab-yoga", name)
+    candidates = []
+    if os.environ.get("COLAB_YOGA_RUNNERS"):
+        candidates.append(os.environ["COLAB_YOGA_RUNNERS"])
+    if os.environ.get("COLAB_YOGA_DIR"):
+        candidates.append(os.path.join(os.environ["COLAB_YOGA_DIR"], name))
+    candidates += [
         os.path.join(install_dir, name),
+        cfg_file,
         os.path.join(local_app_data, "Programs", "Colab-yoga", name),
-    ):
+    ]
+    for path in candidates:
         if os.path.isfile(path):
             return path
-    return None
+    return cfg_file
+
+
+# How a runner boot script names the PC's tailnet address for the reverse tunnel. An unset
+# local_tailscale_ip leaves a <YOUR_...> placeholder (or nothing) there.
+_LOCAL_MCP_IP_RE = re.compile(r"""LOCAL_MCP_IP\s*=\s*["']([^"']*)["']""")
+_LOCAL_MCP_ATON_RE = re.compile(r"inet_aton\(\"([0-9.]+)\"\)")
+_TUNNEL_CFG_CACHE: tuple = ("", -1, -1, False)
+
+
+def local_mcp_tunnel_configured(env=None) -> bool:
+    """True when the cloud is set up to reach this PC's MCP: a runner names a real LOCAL_MCP_IP
+    (not empty, not a <YOUR_ placeholder), or COLAB_LOCAL_MCP_AUTO=1. Only then do wake and the
+    keeper start the local MCP on their own; a manual start is never gated by this."""
+    global _TUNNEL_CFG_CACHE
+    env = os.environ if env is None else env
+    if env.get("COLAB_LOCAL_MCP_AUTO") == "1":
+        return True
+    path = resolve_runners_path()
+    if not path:
+        return False
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    key = (path, st.st_mtime_ns, st.st_size)
+    if _TUNNEL_CFG_CACHE[:3] == key:
+        return _TUNNEL_CFG_CACHE[3]
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            runners = json.load(f)
+    except Exception:
+        return False
+    configured = False
+    if isinstance(runners, dict):
+        for info in runners.values():
+            code = str(info.get("code") or "") if isinstance(info, dict) else ""
+            for ip in _LOCAL_MCP_IP_RE.findall(code) + _LOCAL_MCP_ATON_RE.findall(code):
+                ip = ip.strip()
+                if ip and not ip.startswith("<YOUR_"):
+                    configured = True
+                    break
+            if configured:
+                break
+    _TUNNEL_CFG_CACHE = (*key, configured)
+    return configured
 
 
 SERVER_TOKEN_REMOTE = "content/colab_yoga_token"
@@ -590,6 +646,8 @@ def _on_wake_url(token: str) -> None:
     elif result == "started":
         print("WAKE_LOG: 已启动后台保活（独立进程，关掉这个命令也不会中断）", flush=True)
 
+    if not local_mcp_tunnel_configured():
+        return  # no reverse tunnel: the local MCP is optional and starts only by hand
     mcp = ensure_local_mcp()
     if mcp["state"] == "started":
         print("WAKE_LOG: 已启动本机 MCP 桥", flush=True)
@@ -1228,6 +1286,13 @@ def cmd_keeper():
     sess = None
     mcp_check = None  # the in-flight local MCP check; a thread, so a slow helper cannot stall a beat
     last_mcp_check = 0.0
+    mcp_fails = [0]  # consecutive failed automatic starts, written by the check thread
+
+    def keeper_mcp_check():
+        if not local_mcp_tunnel_configured():
+            return
+        res = ensure_local_mcp()
+        mcp_fails[0] = mcp_fails[0] + 1 if res.get("state") == "failed" else 0
     try:
         while True:
             cycle = time.time()
@@ -1288,9 +1353,10 @@ def cmd_keeper():
                 st["exit_reason"] = "server_unreachable"
                 break
             # A live session is confirmed here (sess came from the account's assignments).
-            if cycle - last_mcp_check >= LOCAL_MCP_CHECK_S and (mcp_check is None or not mcp_check.is_alive()):
+            if (cycle - last_mcp_check >= local_mcp_retry_s(mcp_fails[0])
+                    and (mcp_check is None or not mcp_check.is_alive())):
                 last_mcp_check = cycle
-                mcp_check = threading.Thread(target=ensure_local_mcp, daemon=True)
+                mcp_check = threading.Thread(target=keeper_mcp_check, daemon=True)
                 mcp_check.start()
             _keeper_save(st)
             next_ledger = _keeper_wait(time.time() + max(1.0, KEEPER_BEAT_S - (time.time() - cycle)),
@@ -1382,7 +1448,16 @@ def stop_keeper() -> None:
 # touches a server started by hand or by another program, and nothing is killed by port.
 LOCAL_MCP_CHECK_S = 60  # while a session is live, the keeper checks the local MCP at most this often
 LOCAL_MCP_TIMEOUT_S = 15  # the helper waits up to 8 s for readiness; past this the call counts as failed
+LOCAL_MCP_BACKOFF_S = (60, 300, 1800)  # the keeper's wait after 1, 2, 3+ failed starts in a row
 LOCAL_MCP_CONFIG = "local_mcp_bridge.json"
+
+
+def local_mcp_retry_s(failures: int) -> int:
+    """How long the keeper waits before its next automatic start: the normal cadence while it
+    works, backing off 60 s -> 300 s -> 1800 s while it keeps failing."""
+    if failures <= 0:
+        return LOCAL_MCP_CHECK_S
+    return LOCAL_MCP_BACKOFF_S[min(failures, len(LOCAL_MCP_BACKOFF_S)) - 1]
 LOCAL_MCP_SKILL_SCRIPT = os.path.join("skills", "colab-gpu-llm-service", "scripts", "local_mcp.py")
 
 
@@ -1392,18 +1467,26 @@ def _install_dir() -> str:
 
 def local_mcp_script_path(install_dir: str = None, env=None, home: str = None):
     """The helper script: the first existing of $COLAB_LOCAL_MCP_SCRIPT, the install's
-    local_mcp_bridge.json "script", then the colab-gpu-llm-service skill under ~/.agents and
-    ~/.claude. Relative paths count from the install dir. None when there is none, which is
-    the normal state of an install without the local MCP."""
+    local_mcp_bridge.json "script", the config dir's %LOCALAPPDATA%/Colab-yoga/
+    local_mcp_bridge.json "script" (colab_kernel.py writes it on export), then the
+    colab-gpu-llm-service skill under ~/.agents and ~/.claude. Relative paths count from the
+    install dir. None when there is none, which is the normal state of an install without the
+    local MCP."""
     install_dir = _install_dir() if install_dir is None else install_dir
     env = os.environ if env is None else env
     home = os.path.expanduser("~") if home is None else home
     candidates = [env.get("COLAB_LOCAL_MCP_SCRIPT") or ""]
-    try:
-        with open(os.path.join(install_dir, LOCAL_MCP_CONFIG), "r", encoding="utf-8") as f:
-            candidates.append(str(json.load(f).get("script") or ""))
-    except Exception:
-        pass
+    local_app_data = env.get("LOCALAPPDATA") or env.get("APPDATA") or os.path.join(home, "AppData", "Local")
+    config_dirs = []
+    if env.get("COLAB_YOGA_DIR"):
+        config_dirs.append(env["COLAB_YOGA_DIR"])
+    config_dirs += [install_dir, os.path.join(local_app_data, "Colab-yoga")]
+    for config_dir in config_dirs:
+        try:
+            with open(os.path.join(config_dir, LOCAL_MCP_CONFIG), "r", encoding="utf-8") as f:
+                candidates.append(str(json.load(f).get("script") or ""))
+        except Exception:
+            pass
     candidates += [os.path.join(home, ".agents", LOCAL_MCP_SKILL_SCRIPT),
                    os.path.join(home, ".claude", LOCAL_MCP_SKILL_SCRIPT)]
     for cand in candidates:

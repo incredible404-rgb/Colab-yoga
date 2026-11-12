@@ -33,7 +33,7 @@ CONTRACT_LLM_FIELDS = {
     "online", "alias", "model_id", "slots_total", "slots_busy", "n_ctx_per_slot", "tokens_seen",
     "last_active_age_s", "mcp_bridge",
 }
-CONTRACT_MCP_FIELDS = {"listening", "owner", "reachable", "error", "checked_age_s"}
+CONTRACT_MCP_FIELDS = {"listening", "owner", "reachable", "error", "configured", "checked_age_s"}
 
 HUIHUI_ALIAS = "Huihui-Qwen3.8-Flash-Next-abliterated-v2-UD-Q4_K_XL"
 TEST_TOKEN = "test-token-0123456789"
@@ -209,6 +209,28 @@ class McpTargetTest(unittest.TestCase):
         self.assertIsNone(self.target_from({"a": {"code": "print(1)"}}))
         with mock.patch.object(srv, "RUNNERS_FILE", os.path.join(tempfile.gettempdir(), "no-such-runners.json")):
             self.assertIsNone(srv._kernel_mcp_target())
+
+    def test_real_colab_kernel_exported_variable_form_and_configured_flag(self):
+        real_code = (
+            'LOCAL_MCP_IP = "100.64.0.22"  # Tailscale IP of the PC\n'
+            "up.sendall(bytes([5, 1, 0, 1]) + socket.inet_aton(LOCAL_MCP_IP) + struct.pack('>H', 3426))\n"
+            "cmd = ['tailscaled', '--socks5-server=localhost:1055']\n"
+        )
+        empty_code = real_code.replace('"100.64.0.22"', '""')
+        placeholder_code = real_code.replace('"100.64.0.22"', '"<YOUR_LOCAL_TAILSCALE_IP>"')
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "runners.json")
+            with mock.patch.object(srv, "RUNNERS_FILE", path):
+                with open(path, "w", encoding="utf-8", newline="\n") as f:
+                    json.dump({"qwen": {"code": real_code}}, f)
+                self.assertEqual(srv._kernel_mcp_target(), ("100.64.0.22", 3426, 1055))
+                self.assertTrue(srv.get_mcp_bridge_status()["configured"])
+                for unset_code in (empty_code, placeholder_code):
+                    srv._MCP_TARGET_MEMO.update(sig=None, target=None)
+                    with open(path, "w", encoding="utf-8", newline="\n") as f:
+                        json.dump({"qwen": {"code": unset_code}}, f)
+                    self.assertIsNone(srv._kernel_mcp_target())
+                    self.assertFalse(srv.get_mcp_bridge_status()["configured"])
 
 
 def free_port():
@@ -1525,6 +1547,20 @@ class IdleWatchdogCadenceTest(unittest.TestCase):
         self.assertEqual(touches, [2])  # the tick that saw inference
         self.assertEqual(ensure, [3, 6, 9, 12])
         self.assertEqual(selftest, [12])
+
+
+class McpBridgeConfiguredTests(unittest.TestCase):
+    """mcp_bridge.configured says whether the runners name a local_tailscale_ip to forward to,
+    the same target _ensure_mcp_bridge uses; the older fields stay."""
+
+    def test_configured_follows_the_kernel_mcp_target(self) -> None:
+        with mock.patch.object(srv, "_kernel_mcp_target", return_value=None):
+            st = srv.get_mcp_bridge_status()
+        self.assertIs(st["configured"], False)
+        for key in ("listening", "owner", "reachable", "error", "checked_age_s"):
+            self.assertIn(key, st)
+        with mock.patch.object(srv, "_kernel_mcp_target", return_value=("100.64.0.1", 3426, 1055)):
+            self.assertIs(srv.get_mcp_bridge_status()["configured"], True)
 
 
 if __name__ == "__main__":

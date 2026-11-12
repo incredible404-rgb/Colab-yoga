@@ -115,7 +115,7 @@ func newApp(p Paths) *App {
 	a.mcpURL = str(m, "accessMcpURL", "http://127.0.0.1:3426")
 	a.novelRoot = str(m, "accessNovelRoot", "")
 	if a.novelRoot == "" {
-		a.novelRoot = homeDir() + `\Documents\Colab创作`
+		a.novelRoot = defaultNovelRoot(homeDir())
 	}
 	a.gpu = str(m, "wakeGPUChoiceV2", "G4")
 	a.idleMin = int(num(m, "idleTimeoutMinutes", 30))

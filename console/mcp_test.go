@@ -27,15 +27,15 @@ func TestReadMCPStartReadsTheBridgeAnswer(t *testing.T) {
 	}
 }
 
-// With the GPU off and the local MCP down, the MCP card still offers the start; a click
-// starts it in the background and does not wake a GPU.
+// With the GPU off and the local MCP down, the MCP card is a quiet optional part that still
+// offers the start; a click starts it in the background and does not wake a GPU.
 func TestMCPCardStartsWithTheGPUOff(t *testing.T) {
 	a := fakeApp(t)
 	stateIdle(a)
 	a.access.MCPUp = false
 	tt := ui.NewTesterWith(a.view, 1440, 900, ui.TesterOptions{Dark: true})
-	if !hasTextPart(tt, "没在运行") {
-		t.Fatalf("the MCP card should say it is down; texts %q", tt.Texts())
+	if !hasTextPart(tt, "可选：配置 local_tailscale_ip") || hasTextPart(tt, "没在运行") {
+		t.Fatalf("the MCP card should say it is optional, not a fault; texts %q", tt.Texts())
 	}
 	if err := tt.Click("启动"); err != nil {
 		t.Fatalf("the start button is missing with the GPU off: %v", err)

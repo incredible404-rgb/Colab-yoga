@@ -12,7 +12,7 @@ script and pip. The installed app runs on its own runtime\\python.exe.
 
 Usage:
   python tools/install.py                 # Full install / sync
-  python tools/install.py --check         # Prepare the runtime, run all checks, stop
+  python tools/install.py --check         # Prepare runtime + dev-venv, run AST/go vet/go test/unit tests, stop
   python tools/install.py --dry-run       # Show actions without modifying files
   python tools/install.py --no-restart    # Do not close or launch the GUI
   python tools/install.py --root <dir>    # Redirect all locations under a sandbox root
@@ -792,7 +792,8 @@ def relaunch_console(paths: InstallPaths, was_running: bool):
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Colab-yoga Installer")
-    parser.add_argument("--check", action="store_true", help="Prepare the runtime, run the checks and exit")
+    parser.add_argument("--check", action="store_true", help="Prepare the embedded runtime and the dev-venv, run AST, go vet, go test "
+                        "and the bridge & server unit tests, then exit")
     parser.add_argument("--dry-run", action="store_true", help="Show actions without modifying files")
     parser.add_argument("--no-restart", action="store_true", help="Do not close or restart running GUI")
     parser.add_argument("--root", type=str, default=None, help="Sandbox root directory")

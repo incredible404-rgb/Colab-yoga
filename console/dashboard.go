@@ -426,16 +426,33 @@ func (a *App) noRuntime() bool {
 	return !a.connected && !a.waking && a.acct.Active == 0 && !a.access.Llama.OK
 }
 
+// mcpForwarded: a running server forwards the MCP to this PC (local_tailscale_ip is set).
+func (a *App) mcpForwarded() bool {
+	st := a.status
+	return a.connected && st != nil && st.LLM != nil && st.LLM.MCP != nil && st.LLM.MCP.forwards()
+}
+
+// mcpQuiet: the local MCP is off and nothing asked for it, neither a reverse tunnel on a
+// running instance nor a manual start that failed. It is optional, so that is no fault.
+func (a *App) mcpQuiet() bool {
+	return !a.access.MCPUp && a.mcpStartErr == "" && !a.mcpForwarded()
+}
+
+// mcpLocalOnly is the summary while the local MCP runs but no tunnel forwards to it.
+const mcpLocalOnly = "本机已就绪 · 云端未转发"
+
 func (a *App) mcpSummary(p Palette) (string, ui.Color) {
 	if !a.access.MCPUp && !a.access.At.IsZero() {
-		if a.noRuntime() {
-			return "—", p.Text3
+		if a.mcpQuiet() {
+			return "未启用（可选）", p.Text3
 		}
 		return "本机服务没开", p.Danger
 	}
 	if st := a.status; st != nil && st.LLM != nil && st.LLM.MCP != nil && a.connected {
 		b := st.LLM.MCP
 		switch {
+		case !b.forwards():
+			return mcpLocalOnly, p.Text3
 		case !b.Listening:
 			return "云端转发没起", p.Danger
 		case b.Reachable != nil && !*b.Reachable:
@@ -624,6 +641,8 @@ func (a *App) waysIn() []wayIn {
 	switch {
 	case checking:
 		mag.state, mag.note = "idle", "检测中…"
+	case mg.ProviderID == "" && !mg.Installed:
+		mag.state, mag.note = "idle", "未安装 Magpie（可选，直接用 OpenAI 兼容 API 的 /v1 接口即可）。"
 	case mg.ProviderID == "":
 		mag.state, mag.note = "warn", "Magpie 里没有指向这个 Tailscale 地址的供应商。"
 	case mg.Off:
@@ -647,10 +666,12 @@ func (a *App) waysIn() []wayIn {
 	switch {
 	case checking:
 		mcp.state, mcp.note = "idle", "检测中…"
-	case !acc.MCPUp && a.noRuntime():
-		mcp.state, mcp.note = "idle", "本机 MCP 没在运行："+acc.MCPErr+"；需要时可以手动启动。"
+	case a.mcpQuiet():
+		mcp.state, mcp.note = "idle", "可选：配置 local_tailscale_ip 并安装 Node + Pi 后，可让云端模型读写本机文件；需要时可以手动启动。"
 	case !acc.MCPUp:
 		mcp.state, mcp.note = "down", "本机 MCP 没在运行："+acc.MCPErr+"；网页里的本机工具暂时不可用。"
+	case mcpText == mcpLocalOnly:
+		mcp.state, mcp.note = "idle", "本机已就绪 · 未配 local_tailscale_ip，云端暂不转发。"
 	case mcpText == "已连通":
 		mcp.state, mcp.note = "ok", "本机工具已连通，默认工作目录见上方。"
 	case mcpText == "云端转发没起" || mcpText == "云端连不到本机":

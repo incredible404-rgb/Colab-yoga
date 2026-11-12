@@ -38,7 +38,13 @@ import install  # noqa: E402
 ROOT_NAME = "Colab-yoga"
 
 # Never in a package, wherever they sit in the tree.
-FORBIDDEN_NAMES = {"colab_kernel_runners.json", "settings.json", "keeper.json"}
+FORBIDDEN_NAMES = {
+    "colab_kernel_runners.json",
+    "settings.json",
+    "keeper.json",
+    "install.json",
+    "local_mcp_bridge.json",
+}
 FORBIDDEN_PATTERNS = (
     re.compile(r"(^|/)\.env($|\.)", re.I),
     re.compile(r"(^|/)[^/]*token[^/]*\.json$", re.I),
@@ -69,9 +75,10 @@ move the exe out of it.
 
 - Settings and state are kept in %LOCALAPPDATA%\\Colab-yoga (not in this folder).
 - First time: the window opens on a sign-in page; sign in with your Google account there.
-- To start models, colab-gpu-llm-service's colab_kernel.py needs to export its
-  colab_kernel_runners.json (it holds your API keys) next to Colab-yoga.exe. This package
-  ships without it, on purpose.
+- To start models, run `python -X utf8 scripts/colab_kernel.py --all` in
+  colab-gpu-llm-service: it writes colab_kernel_runners.json (with your API keys) to
+  %LOCALAPPDATA%\\Colab-yoga automatically, so this folder works from anywhere without copying
+  files by hand (a file next to Colab-yoga.exe overrides it). This package ships without it.
 - For an AI agent (Claude Code, Codex, ...): copy skills\\colab-yoga\\ (the whole folder) into
   the agent's skills directory, e.g. ~/.claude/skills/ or ~/.agents/skills/. It tells the
   agent how to bind, wake, check and release, and references\\api.md has the server API.
@@ -84,8 +91,10 @@ Colab-yoga {version}（Windows x64，免安装）
 
 - 设置和状态保存在 %LOCALAPPDATA%\\Colab-yoga，不在这个文件夹里。
 - 第一次使用：窗口打开就是登录页，在那里用 Google 账号登录。
-- 要启动模型，需要 colab-gpu-llm-service 的 colab_kernel.py 把 colab_kernel_runners.json
-  （含你的 API 密钥）导出到 Colab-yoga.exe 旁边。本包不带这个文件，是故意的。
+- 要启动模型，在 colab-gpu-llm-service 中运行 `python -X utf8 scripts/colab_kernel.py --all`：
+  它会自动把 colab_kernel_runners.json（含你的 API 密钥）写入 %LOCALAPPDATA%\\Colab-yoga，
+  免安装包放在任意位置都能直接读取，无需手动拷文件（放在 Colab-yoga.exe 旁的同名文件优先）。
+  本包不带这个文件。
 - 给 AI agent（Claude Code、Codex 等）用：把 skills\\colab-yoga\\ 整个文件夹复制到 agent 的
   技能目录（如 ~/.claude/skills/ 或 ~/.agents/skills/）。技能讲清绑定、唤醒、查看、释放怎么做，
   references\\api.md 是服务端接口说明。

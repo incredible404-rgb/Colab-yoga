@@ -25,8 +25,8 @@ const (
 )
 
 var darkPalette = Palette{
-	Dark:  true,
-	Bg:    ui.Hex("#1F1E1D"), Panel: ui.Hex("#1A1918"), Card: ui.Hex("#262624"),
+	Dark: true,
+	Bg:   ui.Hex("#1F1E1D"), Panel: ui.Hex("#1A1918"), Card: ui.Hex("#262624"),
 	Raised: ui.Hex("#30302E"), Hover: ui.Hex("#3D3D3A"),
 	Border: ui.Hex("#30302E"), BorderStrong: ui.Hex("#4D4C48"),
 	Text: ui.Hex("#FAF9F5"), Text2: ui.Hex("#C2C0B6"), Text3: ui.Hex("#9C9A92"),
@@ -34,12 +34,12 @@ var darkPalette = Palette{
 	Ink: ui.Hex("#FAF9F5"), InkHover: ui.Hex("#E8E6DC"), InkText: ui.Hex("#141413"),
 	Success: ui.Hex("#9CB27A"), Warning: ui.Hex("#D9A55B"), Danger: ui.Hex("#E07A6A"),
 	Info: ui.Hex("#90C3F6"), Muted: ui.Hex("#73726C"),
-	Off: ui.Hex("#73726C"),
+	Off:       ui.Hex("#73726C"),
 	ChartVRAM: ui.Hex("#D97757"), ChartRAM: ui.Hex("#6A9BCC"), ChartDisk: ui.Hex("#9CB27A"),
 }
 
 var lightPalette = Palette{
-	Bg:    ui.Hex("#FAF9F5"), Panel: ui.Hex("#F5F4ED"), Card: ui.Hex("#FFFFFF"),
+	Bg: ui.Hex("#FAF9F5"), Panel: ui.Hex("#F5F4ED"), Card: ui.Hex("#FFFFFF"),
 	Raised: ui.Hex("#F0EEE6"), Hover: ui.Hex("#E8E6DC"),
 	Border: ui.Hex("#E8E6DC"), BorderStrong: ui.Hex("#D1CFC5"),
 	Text: ui.Hex("#141413"), Text2: ui.Hex("#3D3D3A"), Text3: ui.Hex("#73726C"),
@@ -47,7 +47,7 @@ var lightPalette = Palette{
 	Ink: ui.Hex("#141413"), InkHover: ui.Hex("#30302E"), InkText: ui.Hex("#FAF9F5"),
 	Success: ui.Hex("#788C5D"), Warning: ui.Hex("#B5822E"), Danger: ui.Hex("#BF4D43"),
 	Info: ui.Hex("#6A9BCC"), Muted: ui.Hex("#B0AEA5"),
-	Off: ui.Hex("#8F8D85"), // Muted is too faint for a label on ivory
+	Off:       ui.Hex("#8F8D85"), // Muted is too faint for a label on ivory
 	ChartVRAM: ui.Hex("#D97757"), ChartRAM: ui.Hex("#6A9BCC"), ChartDisk: ui.Hex("#788C5D"),
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"image/png"
 	"os"
 	"path/filepath"
@@ -45,7 +46,7 @@ func fakeApp(t *testing.T) *App {
 	up := true
 	a.access = Access{At: time.Now(), Llama: LlamaProbe{OK: true, Alias: "Gemma-4-31B-it-ARA-Heretic-Q8_0", NCtx: 262144, SlotsTotal: 1},
 		Magpie: MagpieProbe{ProviderID: "qwen-colab", ProviderName: "Colab Qwen", Off: true, GatewayUp: &up, Listed: true},
-		MCPUp: true}
+		MCPUp:  true}
 	a.keeper = Keeper{Alive: true, Beats: 120}
 	return a
 }
@@ -554,4 +555,104 @@ func hasTextPart(tt *ui.Tester, part string) bool {
 		}
 	}
 	return false
+}
+
+// wayInNamed is the access card row with this title.
+func wayInNamed(t *testing.T, a *App, title string) wayIn {
+	t.Helper()
+	for _, w := range a.waysIn() {
+		if w.title == title {
+			return w
+		}
+	}
+	t.Fatalf("no way in %q", title)
+	return wayIn{}
+}
+
+func TestMagpieNotInstalledIsQuietAndAMissingProviderWarns(t *testing.T) {
+	a := fakeApp(t)
+	a.access.At = time.Now()
+	a.access.Magpie = MagpieProbe{}
+	if w := wayInNamed(t, a, "Magpie"); w.state != "idle" || !strings.Contains(w.note, "未安装 Magpie") {
+		t.Errorf("no Magpie at all is optional, not a warning: %q %q", w.state, w.note)
+	}
+	a.access.Magpie = MagpieProbe{Installed: true}
+	if w := wayInNamed(t, a, "Magpie"); w.state != "warn" || !strings.Contains(w.note, "没有指向这个 Tailscale") {
+		t.Errorf("Magpie without the provider still warns: %q %q", w.state, w.note)
+	}
+}
+
+func TestOptionalMCPStaysQuietUntilATunnelOrAManualStartAsksForIt(t *testing.T) {
+	a := fakeApp(t)
+	no, yes := false, true
+	a.access.At = time.Now()
+	a.access.MCPUp, a.access.MCPErr = false, "dial tcp 127.0.0.1:3426: connectex: refused"
+	a.status.LLM.MCP = &MCPBridge{Configured: &no}
+	if text, col := a.mcpSummary(darkPalette); text != "未启用（可选）" || col != darkPalette.Text3 {
+		t.Errorf("no tunnel: summary %q in %v", text, col)
+	}
+	w := wayInNamed(t, a, "MCP 桥")
+	if w.state != "idle" || strings.Contains(w.note, "connectex") || !strings.Contains(w.note, "local_tailscale_ip") || w.manual == nil {
+		t.Errorf("no tunnel: card %q %q manual=%v", w.state, w.note, w.manual != nil)
+	}
+	a.mcpStartErr = "端口 3426 被其他程序占用"
+	if w := wayInNamed(t, a, "MCP 桥"); w.state != "down" || !strings.Contains(w.note, "手动启动没成功") {
+		t.Errorf("a failed manual start is shown: %q %q", w.state, w.note)
+	}
+	a.mcpStartErr = ""
+	a.status.LLM.MCP = &MCPBridge{Configured: &yes}
+	if text, col := a.mcpSummary(darkPalette); col != darkPalette.Danger || wayInNamed(t, a, "MCP 桥").state != "down" {
+		t.Errorf("a configured tunnel with the local MCP down is a fault: %q", text)
+	}
+	a.access.MCPUp = true
+	a.status.LLM.MCP = &MCPBridge{Configured: &no}
+	if text, col := a.mcpSummary(darkPalette); text != mcpLocalOnly || col == darkPalette.Danger {
+		t.Errorf("local MCP up without a tunnel: summary %q", text)
+	}
+	if w := wayInNamed(t, a, "MCP 桥"); w.state != "idle" || !strings.Contains(w.note, "未配 local_tailscale_ip") {
+		t.Errorf("local MCP up without a tunnel: card %q %q", w.state, w.note)
+	}
+	if !(&MCPBridge{Listening: true}).forwards() || (&MCPBridge{}).forwards() {
+		t.Error("a server without the configured field: forwarding is read from the other fields")
+	}
+}
+
+func TestDefaultNovelRootFollowsTheLocalMCPConfigThenDocuments(t *testing.T) {
+	home := t.TempDir()
+	if got := defaultNovelRoot(home); got != filepath.Join(home, "Documents") {
+		t.Errorf("no Colab创作 folder: %q", got)
+	}
+	novel := filepath.Join(home, "Documents", "Colab创作")
+	if err := os.MkdirAll(novel, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := defaultNovelRoot(home); got != novel {
+		t.Errorf("Colab创作 exists: %q", got)
+	}
+	cfg := filepath.Join(home, ".config", "colab-cli", "local-mcp.json")
+	if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg, []byte(`{"cwd": "D:\\Writing"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := defaultNovelRoot(home); got != `D:\Writing` {
+		t.Errorf("the local MCP's cwd comes first: %q", got)
+	}
+}
+
+func TestInstallAnchorRecordsTheAppDir(t *testing.T) {
+	dir := t.TempDir()
+	cfg, app := filepath.Join(dir, "cfg"), filepath.Join(dir, "unzipped")
+	writeInstallAnchor(Paths{ConfigDir: cfg, AppDir: app})
+	b, err := os.ReadFile(filepath.Join(cfg, "install.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		AppDir string `json:"appDir"`
+	}
+	if err := json.Unmarshal(b, &got); err != nil || got.AppDir != app || !strings.HasSuffix(string(b), "}\n") {
+		t.Errorf("install.json: %q (%v)", b, err)
+	}
 }

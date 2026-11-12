@@ -428,22 +428,52 @@ class RunnerPathTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{}", encoding="utf-8")
 
-    def _call_resolve(self) -> str | None:
+    def _call_resolve(self, **env) -> str:
         orig_file = cb.__file__
-        orig_env = os.environ.get("LOCALAPPDATA")
+        keys = ("LOCALAPPDATA", "COLAB_YOGA_RUNNERS", "COLAB_YOGA_DIR")
+        orig_env = {k: os.environ.get(k) for k in keys}
         try:
             cb.__file__ = str(self.bridge_py)
+            for k in keys:
+                os.environ.pop(k, None)
             os.environ["LOCALAPPDATA"] = str(self.local)
+            os.environ.update(env)
             return cb.resolve_runners_path()
         finally:
             cb.__file__ = orig_file
-            if orig_env is None:
-                os.environ.pop("LOCALAPPDATA", None)
-            else:
-                os.environ["LOCALAPPDATA"] = orig_env
+            for k, v in orig_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
-    def test_missing(self) -> None:
-        self.assertIsNone(self._call_resolve())
+    @property
+    def cfg_file(self) -> Path:
+        return self.local / "Colab-yoga" / "colab_kernel_runners.json"
+
+    def test_missing_falls_back_to_the_config_dir_path(self) -> None:
+        self.assertEqual(self._call_resolve(), str(self.cfg_file))
+        self.assertFalse(self.cfg_file.exists())
+
+    def test_config_dir_comes_after_the_install_and_before_the_standard_install(self) -> None:
+        self._put(self.standard_file)
+        self._put(self.cfg_file)
+        self.assertEqual(self._call_resolve(), str(self.cfg_file))
+        self._put(self.install_file)
+        self.assertEqual(self._call_resolve(), str(self.install_file))
+
+    def test_env_overrides_come_first_and_only_when_the_file_exists(self) -> None:
+        self._put(self.install_file)
+        override = self.tmp / "elsewhere" / "r.json"
+        yoga_dir = self.tmp / "yoga"
+        self.assertEqual(self._call_resolve(COLAB_YOGA_RUNNERS=str(override),
+                                             COLAB_YOGA_DIR=str(yoga_dir)), str(self.install_file))
+        self._put(yoga_dir / "colab_kernel_runners.json")
+        self.assertEqual(self._call_resolve(COLAB_YOGA_RUNNERS=str(override), COLAB_YOGA_DIR=str(yoga_dir)),
+                         str(yoga_dir / "colab_kernel_runners.json"))
+        self._put(override)
+        self.assertEqual(self._call_resolve(COLAB_YOGA_RUNNERS=str(override), COLAB_YOGA_DIR=str(yoga_dir)),
+                         str(override))
 
     def test_install_copy(self) -> None:
         self._put(self.install_file)
@@ -461,7 +491,7 @@ class RunnerPathTests(unittest.TestCase):
 
     def test_old_easycolab_path_is_ignored(self) -> None:
         self._put(self.old_file)
-        self.assertIsNone(self._call_resolve())
+        self.assertEqual(self._call_resolve(), str(self.cfg_file))
 
 
 class AuthStatusTests(unittest.TestCase):
@@ -637,6 +667,7 @@ class KeeperLoopTests(unittest.TestCase):
         patch(cb, "_tfe_keep_alive", lambda endpoint: None)
         patch(cb, "state", types.SimpleNamespace(store=types.SimpleNamespace(add=lambda s: None)))
         patch(cb, "local_mcp_script_path", lambda: None)
+        patch(cb, "resolve_runners_path", lambda: str(self.tmp / "colab_kernel_runners.json"))
         patch(cb.time, "time", lambda: self.now)
         patch(cb.time, "sleep", sleep)
 
@@ -782,6 +813,8 @@ class LocalMcpTests(unittest.TestCase):
         self._patch(cb, "save_server_token", lambda token: None)
         self._patch(cb, "ensure_keeper", lambda: "running")
         self._patch(cb, "local_mcp_script_path", lambda: self.script)
+        self.tunnel = True
+        self._patch(cb, "local_mcp_tunnel_configured", lambda: self.tunnel)
         self._patch(cb.time, "time", lambda: self.now)
         self._patch(cb.time, "sleep", sleep)
 
@@ -792,6 +825,61 @@ class LocalMcpTests(unittest.TestCase):
     def _patch(self, obj, name, val) -> None:
         self._saved[(obj, name)] = getattr(obj, name, None)
         setattr(obj, name, val)
+
+    def test_wake_without_a_reverse_tunnel_does_not_start_the_local_mcp(self) -> None:
+        self.script = self._helper({"ok": True, "started": True, "pid": 7})
+        self.tunnel = False
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cb._on_wake_url("tok")
+        self.assertEqual(self._actions(), [])
+        self.assertNotIn("MCP", out.getvalue())
+
+    def test_keeper_without_a_reverse_tunnel_does_not_start_the_local_mcp(self) -> None:
+        calls = []
+        self._patch(cb, "ensure_local_mcp", lambda: calls.append(1) or {"state": "started", "error": ""})
+        self.tunnel = False
+        self.release_at = self.now + 300
+        cb.cmd_keeper()
+        self.assertEqual(calls, [])
+
+    def test_keeper_backs_off_after_failed_starts(self) -> None:
+        calls = []
+        self._patch(cb, "ensure_local_mcp", lambda: calls.append(cb.time.time()) or {"state": "failed", "error": "x"})
+        self.release_at = self.now + 2400  # every 60 s would be 40 tries
+        cb.cmd_keeper()
+        gaps = [b - a for a, b in zip(calls, calls[1:])]
+        self.assertEqual(len(calls), 4, gaps)
+        self.assertGreaterEqual(gaps[0], 60)
+        self.assertGreaterEqual(gaps[1], 300)
+        self.assertGreaterEqual(gaps[2], 1800)
+
+    def test_retry_wait_backs_off_and_resets(self) -> None:
+        self.assertEqual([cb.local_mcp_retry_s(n) for n in range(5)],
+                         [cb.LOCAL_MCP_CHECK_S, 60, 300, 1800, 1800])
+
+    def test_tunnel_needs_a_real_local_mcp_ip_or_the_auto_switch(self) -> None:
+        self._patch(cb, "local_mcp_tunnel_configured", self._saved[(cb, "local_mcp_tunnel_configured")])
+        runners = self.tmp / "runners.json"
+        self._patch(cb, "resolve_runners_path", lambda: str(runners))
+        self.assertFalse(cb.local_mcp_tunnel_configured(env={}))
+        runners.write_text(json.dumps({"m": {"code": 'LOCAL_MCP_IP = "<YOUR_TAILSCALE_IP>"\n'}}), encoding="utf-8")
+        self.assertFalse(cb.local_mcp_tunnel_configured(env={}))
+        self.assertTrue(cb.local_mcp_tunnel_configured(env={"COLAB_LOCAL_MCP_AUTO": "1"}))
+        runners.write_text(json.dumps({"m": {"code": 'LOCAL_MCP_IP = "100.64.0.9"\n'}}), encoding="utf-8")
+        self.assertTrue(cb.local_mcp_tunnel_configured(env={}))
+
+    def test_script_from_the_config_dirs_local_mcp_bridge_json(self) -> None:
+        helper = self.tmp / "svc" / "local_mcp.py"
+        helper.parent.mkdir()
+        helper.write_text("", encoding="utf-8")
+        cfg = self.tmp / "local" / "Colab-yoga"
+        cfg.mkdir(parents=True)
+        (cfg / "local_mcp_bridge.json").write_text(json.dumps({"script": str(helper)}), encoding="utf-8")
+        find = self._saved[(cb, "local_mcp_script_path")]
+        found = find(install_dir=str(self.tmp / "app"), env={"LOCALAPPDATA": str(self.tmp / "local")},
+                     home=str(self.tmp / "home"))
+        self.assertEqual(found, str(helper))
 
     def _helper(self, reply: dict, exit_code: int = 0) -> str:
         """A stand-in helper: records its action in self.log and prints `reply` as its last line."""

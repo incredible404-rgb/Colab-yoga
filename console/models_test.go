@@ -244,7 +244,7 @@ func TestNoRunnersShowsTheExportHintAndNoModels(t *testing.T) {
 	a.catalog = nil
 	a.status.LLM.Online = false
 	tt := ui.NewTesterWith(a.view, 1440, 900, ui.TesterOptions{Dark: true})
-	if !hasTextPart(tt, "colab-gpu-llm-service") || !hasTextPart(tt, "colab_kernel_runners.json") {
+	if !hasTextPart(tt, "colab-gpu-llm-service") || !hasTextPart(tt, "colab_kernel.py --all") || !hasTextPart(tt, `%LOCALAPPDATA%\Colab-yoga\colab_kernel_runners.json`) {
 		t.Errorf("the empty list should say where the runners come from; texts %q", tt.Texts())
 	}
 	if hasTextPart(tt, "Gemma-4-31B (ARA Heretic Q8_0)") {

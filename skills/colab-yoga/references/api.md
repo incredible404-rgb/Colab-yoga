@@ -31,7 +31,7 @@ The token is the `token` field of `%LOCALAPPDATA%\Colab-yoga\server_token.json`,
 - `idle_timeout_minutes`, `idle_remaining_seconds` (-1 when the automatic release is off)
 - `loaded_model_ids`, `context_length`
 - `is_downloading`, `is_loading_vram`, `task_progress`, `task_message`, `console_lines`
-- `llm_server`: `{online, alias, model_id, slots_total, slots_busy, n_ctx_per_slot, tokens_seen, last_active_age_s, mcp_bridge: {listening, owner, reachable, error, checked_age_s}}`
+- `llm_server`: `{online, alias, model_id, slots_total, slots_busy, n_ctx_per_slot, tokens_seen, last_active_age_s, mcp_bridge: {listening, owner, reachable, error, configured, checked_age_s}}`; `mcp_bridge.configured` (bool) is true when the runners file sets a `local_tailscale_ip` to forward the MCP to, and false means forwarding is off by choice, not a fault
 
 `llm_server.model_id` is the runner slug whose `alias` llama-server reports on `:8081`, and `""` when that alias is not in the runners file; `loaded_model_ids` then lists the alias instead. `llm_server.online` false means no model is serving.
 

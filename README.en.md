@@ -33,6 +33,15 @@ The model runtime itself (`colab_kernel` startup script, model catalog, Chinese 
 
 Conventions shared across components (directory layout, APIs, state fields, and keepalive rules) are documented in [docs/architecture.md](docs/architecture.md).
 
+## Getting started (first model in 4 steps)
+
+1. **Sign in**: unzip the portable package, run `Colab-yoga.exe`, and sign in with your Google account.
+2. **Set up Tailscale**: configure a Tailscale Service once, as described in colab-gpu-llm-service; web chat, the API and MCP all use that address.
+3. **Export the model list**: clone [colab-gpu-llm-service](https://github.com/incredible404-rgb/colab-gpu-llm-service), fill in the 4 required fields of `.secrets.json` (`api_key`, `ts_client_id`, `ts_client_secret`, `tailnet_fqdn`), and run `python -X utf8 scripts/colab_kernel.py --all`. It writes `%LOCALAPPDATA%\Colab-yoga\colab_kernel_runners.json` automatically, and the console lists the models right away.
+4. **Use it**: back in the console, click **Wake G4**, load a model, then chat on the web or call the `/v1` API.
+
+Without colab-gpu-llm-service, Colab-yoga still signs in, wakes, keeps alive and releases instances on its own; there are just no models to load.
+
 ## Deployment
 
 Two ways, and neither depends on another application's install directory: Colab-yoga brings its own Python runtime and dependencies.
@@ -42,7 +51,7 @@ Two ways, and neither depends on another application's install directory: Colab-
 1. Download `Colab-yoga-<version>-windows-amd64.zip` (with its `.sha256` next to it) from [Releases](https://github.com/incredible404-rgb/Colab-yoga/releases).
 2. Unzip it anywhere and run `Colab-yoga.exe`. No separate Python install is needed. The whole folder can be moved as a unit; do not take the exe out of it.
 3. Settings and state live in `%LOCALAPPDATA%\Colab-yoga`, not in the unzipped folder. The package creates no shortcuts and writes nothing to the registry; delete the folder to uninstall.
-4. To see and switch models, put `colab_kernel_runners.json` (exported by colab-gpu-llm-service's `colab_kernel.py`, contains API keys) next to `Colab-yoga.exe`. The package does not ship it; without it the console's model list is empty and says where to export it from.
+4. The model list `colab_kernel_runners.json` (exported by colab-gpu-llm-service's `colab_kernel.py`, contains API keys) and the local MCP config `local_mcp_bridge.json` are both written to `%LOCALAPPDATA%\Colab-yoga` by default, and the console reads them from there, so the package works from any folder with no files to copy by hand; a file of the same name next to `Colab-yoga.exe` takes precedence. The package ships neither; without a model list the model library is empty and says how to export one.
 
 ### Option 2: install from source
 
@@ -75,7 +84,11 @@ It stages the package the same way an install does, in a temporary directory, zi
 
 ## Local MCP bridge
 
-Install `scripts/local_mcp.py` and its neighboring `local_mcp.mjs` from [colab-gpu-llm-service](https://github.com/incredible404-rgb/colab-gpu-llm-service), with Node.js and Pi available. The console looks for `COLAB_LOCAL_MCP_SCRIPT`, the `script` field in `local_mcp_bridge.json` beside the exe, then `~/.agents/skills/colab-gpu-llm-service/scripts/local_mcp.py` (also accepting `~/.claude/skills/`). For example:
+The local MCP and Magpie are both optional: when they are not installed or configured, their cards show a quiet note instead of errors.
+
+The local MCP needs `scripts/local_mcp.py` and its neighboring `local_mcp.mjs` from [colab-gpu-llm-service](https://github.com/incredible404-rgb/colab-gpu-llm-service), plus Node.js and Pi; cloud forwarding also needs `local_tailscale_ip` set in the model list. By default the local MCP listens only on `127.0.0.1` and the configured `local_tailscale_ip`, never on the public LAN.
+
+The console looks for `COLAB_LOCAL_MCP_SCRIPT`, the `script` field in `local_mcp_bridge.json` beside the exe, the `script` field in `%LOCALAPPDATA%\Colab-yoga\local_mcp_bridge.json` (written by `colab_kernel.py` on export), then `~/.agents/skills/colab-gpu-llm-service/scripts/local_mcp.py` (also accepting `~/.claude/skills/`). Usually there is nothing to write by hand; to point it somewhere yourself, use:
 
 ```json
 {"script": "C:/tools/colab-gpu-llm-service/scripts/local_mcp.py"}
