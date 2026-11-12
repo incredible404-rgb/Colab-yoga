@@ -305,7 +305,7 @@ func (a *App) modelCard(c *ui.Context, p Palette) ui.Element {
 			}
 		})
 		if hint != "" {
-			ui.Text(c.Key("hint"), hint).FontSize(13).TextColor(p.Text3).Pretty().ContentTransition(crossfade).Transition(rowMotion)
+			ui.Text(c.Key("hint"), hint).FontSize(13).TextColor(p.Text3).Pretty().ContentTransition(crossfade).Transition(liveMotion)
 		}
 		switch {
 		case a.waking:
@@ -332,10 +332,10 @@ func (a *App) modelCard(c *ui.Context, p Palette) ui.Element {
 		}
 		if alias != "" && !loading {
 			ui.Text(c.Key("alias"), alias).Font(fontMono).FontSize(12).TextColor(p.Text3).SingleLine().Tooltip(alias).
-				ContentTransition(morph).Transition(rowMotion)
+				ContentTransition(morph).Transition(liveMotion)
 		}
 		if m != nil && !loading {
-			ui.Row(c.Key("chips-" + m.ID)).Wrap().Gap(6).Transition(rowMotion).Children(func() {
+			ui.Row(c.Key("chips-" + m.ID)).Wrap().Gap(6).Transition(liveMotion).Children(func() {
 				for _, tag := range m.Tags {
 					chip(c, p, tag)
 				}
@@ -359,7 +359,7 @@ func (a *App) modelCard(c *ui.Context, p Palette) ui.Element {
 			})
 		}
 		if st != nil && a.connected && st.VRAMTotal > 0 {
-			ui.Column(c.Key("vram")).Gap(6).Transition(rowMotion).Children(func() {
+			ui.Column(c.Key("vram")).Gap(6).Transition(liveMotion).Children(func() {
 				ui.Row(c).Children(func() {
 					ui.Text(c, "显存").FontSize(12).TextColor(p.Text3).Grow(1)
 					ui.Text(c, fmt.Sprintf("%.1f / %.1f GB", st.VRAMUsed, st.VRAMTotal)).Font(fontMono).FontFeatures("tnum").FontSize(12).
@@ -370,7 +370,7 @@ func (a *App) modelCard(c *ui.Context, p Palette) ui.Element {
 		}
 		// With no server and no model answering there is nothing to count: no row of dashes.
 		if st != nil && a.connected || a.access.Llama.OK {
-			ui.Row(c.Key("metrics")).Wrap().GapX(32).GapY(12).Transition(rowMotion).Children(func() {
+			ui.Row(c.Key("metrics")).Wrap().GapX(32).GapY(12).Transition(liveMotion).Children(func() {
 				slots, last := "—", "—"
 				if st != nil && st.LLM != nil && st.LLM.Online && a.connected {
 					slots = fmt.Sprintf("%d / %d 忙", st.LLM.SlotsBusy, st.LLM.SlotsTotal)
@@ -387,7 +387,7 @@ func (a *App) modelCard(c *ui.Context, p Palette) ui.Element {
 		// Loading the first model and opening the chat are steps of the top bar; what is
 		// left here is what is done to a model that runs.
 		if online && !loading {
-			ui.Row(c.Key("actions")).Gap(8).Wrap().Transition(rowMotion).Children(func() {
+			ui.Row(c.Key("actions")).Gap(8).Wrap().Transition(liveMotion).Children(func() {
 				off := ""
 				switch {
 				case !a.connected:

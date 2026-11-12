@@ -437,9 +437,7 @@ func TestIdleWindowIsStill(t *testing.T) {
 	}
 	a.waking = false
 	tt.Frame()
-	// The wake's stages fold away and the card's rows glide back into place on the page's
-	// own spring, which takes a little over a second to come to rest.
-	tt.Advance(2 * time.Second)
+	tt.Advance(time.Second)
 	if tt.FramePending() {
 		t.Error("the pulse must stop once the job is done")
 	}

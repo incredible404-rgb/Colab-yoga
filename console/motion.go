@@ -30,8 +30,12 @@ var (
 
 	colorMotion = ui.ElementTransition{Colors: true, Shadows: true, Animation: &fadeColor}
 
-	// The page going away lifts and fades quickly while the next one's cards rise in.
+	// The page going away lifts and fades quickly while the next one's cards rise in. It
+	// names Colors so that nothing else animates: a transition that names no property
+	// animates size too, and the page's height then rode this spring whenever a card grew
+	// or shrank, asking for frames for 1.3 s after a wake while nothing moved.
 	pageMotion = ui.ElementTransition{
+		Colors:       true,
 		Animation:    &springEnter,
 		Exit:         &ui.Motion{Y: -10, Blur: 3},
 		ExitDuration: 110 * time.Millisecond,
@@ -47,8 +51,10 @@ var (
 		Enter:     &ui.Motion{Collapse: true, Y: -6},
 		Exit:      &ui.Motion{Collapse: true, Y: -6},
 	}
-	// What shows a job in flight (its stages, its latest line) opens as a row does and is
-	// gone at once when the job ends: the window is still again within the second.
+	// The rows of the model card. A job in flight adds rows (its stages, its latest line)
+	// and takes them away, and a transition that names no property animates position too:
+	// every row below glides to its new place. On the page's spring that glide takes
+	// 1.2 s to come to rest; on this shorter one the window is still within the second.
 	liveMotion = ui.ElementTransition{
 		Animation:    &springSize,
 		Enter:        &ui.Motion{Collapse: true, Y: -6},
@@ -119,6 +125,7 @@ func blendPalette(t float32) Palette {
 		Ink: m(d.Ink, l.Ink), InkHover: m(d.InkHover, l.InkHover), InkText: m(d.InkText, l.InkText),
 		Success: m(d.Success, l.Success), Warning: m(d.Warning, l.Warning), Danger: m(d.Danger, l.Danger),
 		Info: m(d.Info, l.Info), Muted: m(d.Muted, l.Muted),
+		Off:       m(d.Off, l.Off),
 		ChartVRAM: m(d.ChartVRAM, l.ChartVRAM), ChartRAM: m(d.ChartRAM, l.ChartRAM), ChartDisk: m(d.ChartDisk, l.ChartDisk),
 	}
 }

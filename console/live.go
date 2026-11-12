@@ -12,7 +12,7 @@ import (
 // Icons are drawn in the color of the text around them (ui.Icon).
 var (
 	iconMoon = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>`))
-	iconSun  = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.6"/><circle cx="12" cy="2.6" r="1.4"/><circle cx="12" cy="21.4" r="1.4"/><circle cx="2.6" cy="12" r="1.4"/><circle cx="21.4" cy="12" r="1.4"/><circle cx="5.35" cy="5.35" r="1.4"/><circle cx="18.65" cy="5.35" r="1.4"/><circle cx="5.35" cy="18.65" r="1.4"/><circle cx="18.65" cy="18.65" r="1.4"/></svg>`))
+	iconSun  = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.4"/><path d="M12 1.6v3M12 19.4v3M1.6 12h3M19.4 12h3M4.65 4.65l2.1 2.1M17.25 17.25l2.1 2.1M4.65 19.35l2.1-2.1M17.25 6.75l2.1-2.1" fill="none" stroke="#000" stroke-width="2.4" stroke-linecap="round"/></svg>`))
 	iconMore = ui.MustParseSVG([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>`))
 )
 

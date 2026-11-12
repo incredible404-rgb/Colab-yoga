@@ -121,6 +121,12 @@ func TestTopBarFollowsTheSession(t *testing.T) {
 		{"model online", nil, []string{"打开网页对话", "续时", "释放"},
 			[]string{"唤醒 G4", "选择 GPU 型号", "加载模型 ▾", "重新部署"}, 1, "打开网页对话",
 			func(a *App) bool { return len(a.opened) == 1 && a.opened[0] == a.tsURL }, nil, true},
+		{"online, no address to open", func(a *App) { a.tsURL = "" }, []string{"打开网页对话", "续时", "释放"},
+			[]string{"唤醒 G4", "加载模型 ▾"}, 0, "", nil, []string{"打开网页对话"}, true},
+		{"account not read yet", func(a *App) { stateIdle(a); a.acct = Account{} }, []string{"唤醒 G4", "正在查询 Colab 账号…", "释放"},
+			[]string{"加载模型 ▾", "重新部署"}, 0, "", nil, []string{"唤醒 G4", "打开网页对话", "续时", "释放"}, false},
+		{"releasing", func(a *App) { a.releasing = true }, []string{"正在释放实例…", "打开网页对话", "释放"},
+			[]string{"唤醒 G4", "加载模型 ▾"}, 1, "", nil, []string{"释放"}, false},
 	}
 	for _, s := range states {
 		for _, width := range []int{1440, 1024} {
@@ -141,7 +147,7 @@ func TestTopBarFollowsTheSession(t *testing.T) {
 				}
 			}
 			// Not billing, the top bar shows the balance alone, without a rate of 0.00 CU/h.
-			if r, ok := tt.Find("余额 2,795.70 CU"); ok != (a.acct.Burn == 0) || (ok && r.Y > 60) {
+			if r, ok := tt.Find("余额 2,795.70 CU"); ok != (a.acct.Known && a.acct.Burn == 0) || (ok && r.Y > 60) {
 				t.Errorf("%s @%d: balance without a rate shown=%v at %+v, burn %.2f", s.name, width, ok, r, a.acct.Burn)
 			}
 			for _, label := range []string{"续时", "释放", "日志"} {
@@ -474,5 +480,41 @@ func TestAccountStaysInReach(t *testing.T) {
 	}
 	if err := tt.Click("取消"); err != nil || a.askLogout {
 		t.Errorf("cancel must close the question: err=%v ask=%v", err, a.askLogout)
+	}
+}
+
+// TestGrayedButtonsStayGrayUnderThePointer: a button that cannot be used now does not light
+// up when the pointer rests on it, whichever kind it would have been. It is measured in the
+// frame: the button's padding stays the color of the bar.
+func TestGrayedButtonsStayGrayUnderThePointer(t *testing.T) {
+	for _, s := range []struct {
+		name, label string
+		setup       func(a *App)
+	}{
+		{"the next step with no address to open (ink)", "打开网页对话", func(a *App) { a.tsURL = "" }},
+		{"wake before the account is read (ink)", "唤醒 G4", func(a *App) { stateIdle(a); a.acct = Account{} }},
+		{"release with nothing to release (danger)", "释放", stateIdle},
+		{"keep alive with nothing connected (outline)", "续时", stateIdle},
+	} {
+		a := fakeApp(t)
+		s.setup(a)
+		tt := ui.NewTesterWith(a.view, 1024, 640, ui.TesterOptions{Dark: true})
+		tt.Advance(2 * time.Second)
+		r, ok := tt.Find(s.label)
+		if !ok {
+			t.Fatalf("%s: no %q", s.name, s.label)
+		}
+		x, y := r.X-8, r.Y+r.H/2 // in the button's padding, left of its label
+		bar := darkPalette.Panel
+		for _, hovered := range []bool{false, true} {
+			if hovered {
+				tt.Move(x, y)
+				tt.Frame()
+				tt.Advance(400 * time.Millisecond) // a hover's color has eased in by now
+			}
+			if c := tt.Image().RGBAAt(int(x), int(y)); c.R != bar.R || c.G != bar.G || c.B != bar.B {
+				t.Errorf("%s: hovered=%v, the padding of %q is #%02X%02X%02X, not the bar's", s.name, hovered, s.label, c.R, c.G, c.B)
+			}
+		}
 	}
 }

@@ -700,7 +700,7 @@ func act(b ui.Element, p Palette, off string, fn func()) ui.Element {
 		return b
 	}
 	return b.AccessDisabled(true).Cursor(ui.CursorDefault).Background(ui.Transparent).Border(1, ui.Transparent).
-		TextColor(p.Muted).AnimatePose(ui.Pose{}, springLift).Tooltip(off)
+		TextColor(p.Off).AnimatePose(ui.Pose{}, springLift).Tooltip(off)
 }
 
 // busyButton stands where a button will be while its job runs: nothing to click, and a

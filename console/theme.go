@@ -13,6 +13,7 @@ type Palette struct {
 	Accent, AccentHover, AccentText       ui.Color
 	Ink, InkHover, InkText                ui.Color // primary buttons: ink on ivory, ivory on slate
 	Success, Warning, Danger, Info, Muted ui.Color
+	Off                                   ui.Color // the label of a control that cannot be used now
 	ChartVRAM, ChartRAM, ChartDisk        ui.Color
 }
 
@@ -33,6 +34,7 @@ var darkPalette = Palette{
 	Ink: ui.Hex("#FAF9F5"), InkHover: ui.Hex("#E8E6DC"), InkText: ui.Hex("#141413"),
 	Success: ui.Hex("#9CB27A"), Warning: ui.Hex("#D9A55B"), Danger: ui.Hex("#E07A6A"),
 	Info: ui.Hex("#90C3F6"), Muted: ui.Hex("#73726C"),
+	Off: ui.Hex("#73726C"),
 	ChartVRAM: ui.Hex("#D97757"), ChartRAM: ui.Hex("#6A9BCC"), ChartDisk: ui.Hex("#9CB27A"),
 }
 
@@ -45,6 +47,7 @@ var lightPalette = Palette{
 	Ink: ui.Hex("#141413"), InkHover: ui.Hex("#30302E"), InkText: ui.Hex("#FAF9F5"),
 	Success: ui.Hex("#788C5D"), Warning: ui.Hex("#B5822E"), Danger: ui.Hex("#BF4D43"),
 	Info: ui.Hex("#6A9BCC"), Muted: ui.Hex("#B0AEA5"),
+	Off: ui.Hex("#8F8D85"), // Muted is too faint for a label on ivory
 	ChartVRAM: ui.Hex("#D97757"), ChartRAM: ui.Hex("#6A9BCC"), ChartDisk: ui.Hex("#788C5D"),
 }
 
