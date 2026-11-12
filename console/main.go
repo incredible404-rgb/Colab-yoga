@@ -61,6 +61,12 @@ func (a *App) makeTray() {
 		return
 	}
 	a.tray = t
+	// Windows keeps an icon after its owner exits unless it is removed while
+	// the native event loop is still running.
+	mygo.App.OnWillQuit(func(*mygo.QuitEvent) {
+		t.Destroy()
+		a.tray = nil
+	})
 	t.OnClick(a.showWindow)
 	a.updateTray()
 }
