@@ -64,7 +64,7 @@ that alias and is never taken for one of the known models. Without the file the 
 no model and says to export it from colab-gpu-llm-service (`colab_kernel.py`); it re-reads the
 file when it changes. The console takes the access address (Tailscale Service host) from the
 `SERVICE_FQDN` in the scripts, else from the first `*.ts.net` host in them; when neither is
-there, fill it in by hand under "Connection & Account" → "Access addresses".
+there, fill it in by hand under "Connection" → "Access addresses".
 
 ### Control token
 

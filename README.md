@@ -73,8 +73,9 @@ py -3 tools/package.py --out <仓库之外的目录>
 
 - 开始菜单或桌面上的「Colab-yoga」。只会运行一个实例：再次打开时，会把已在运行的窗口调出来。
 - 关窗口会缩到托盘，GPU 不受影响。托盘图标的提示里显示是否在计费和当前余额；右键菜单可以打开网页对话、续时、释放（会先打开窗口确认）、退出。
-- 第一次使用：在「连接与账号」页绑定 Google 账号。点「绑定」后会打开浏览器，授权后把页面上的授权码粘贴回来。令牌与 colab-gpu-llm-service 共用（`~/.config/colab-cli/token.json`），已经绑定过就不用再绑；同一个账号重新授权不会动正在运行的会话。
-- 接入地址（Tailscale Service 域名）会从模型清单的脚本里自动识别（先找 `SERVICE_FQDN`，再找任意 `*.ts.net` 域名）；识别不到就在「连接与账号 → 接入地址」里手填。
+- 第一次使用：没绑定 Google 账号时，窗口只有一个登录页。点「用 Google 账号登录」会打开浏览器，授权后把页面上的授权码粘贴回来。之后账号在左栏最下面，点开可以换号、刷新余额、退出。令牌与 colab-gpu-llm-service 共用（`~/.config/colab-cli/token.json`），已经绑定过就不用再绑；同一个账号重新授权不会动正在运行的会话。
+- 一次使用的几步都在顶栏，从左到右：「唤醒 G4」（箭头换 GPU 型号）→「加载模型」→「打开网页对话」→「续时」→「释放」。任何时候只有下一步是实心按钮；现在用不了的按钮是灰的，鼠标停上去会说原因。唤醒和装载模型的进度在仪表盘的「当前模型」卡里分阶段显示，唤醒失败会停在出错的那一步并写明原因。
+- 接入地址（Tailscale Service 域名）会从模型清单的脚本里自动识别（先找 `SERVICE_FQDN`，再找任意 `*.ts.net` 域名）；识别不到就在「连接 → 接入地址」里手填。
 - 实例保活由独立的 keeper 进程负责，关掉或退出管理台都不影响；只用命令行 `bridge wake` 唤醒时，wake 成功后也会自己把 keeper 拉起来。服务端的控制接口（加载、卸载、改闲置时间、释放）要带随机生成的 Bearer 令牌，由唤醒时下发并保存在 `%LOCALAPPDATA%\Colab-yoga\server_token.json`，只有 `GET /api/status` 不需要。云端看门狗把网页、Magpie、MCP 里的对话都算作在用，闲置到设定时间（默认 30 分钟）才会释放实例；剩 5 分钟时会弹系统通知。
 
 ## 开发
@@ -91,9 +92,10 @@ py -3 tools/install.py
 装好之后，也可以直接用安装目录里的运行时跑：`runtime/python.exe -X utf8 tools/install.py`（它自己没有 pip，只在依赖已经就位时可用）。
 
 - 截图自检：`cd console && SNAP_DIR=<目录> go test -run Snapshots`，会输出深色、浅色、多种尺寸、各种状态的 PNG。
+- 主页动图：`cd console && FRAMES_DIR=<目录> go test -run ReadmeFrames` 输出一次完整使用过程（唤醒、加载模型、切换配色）的逐帧 PNG，合成后就是 `docs/motion.gif`。
 - 动效：都在 `console/motion.go`。位移走弹簧（中途再点会顺着原速度转向），颜色和透明度走短曲线，系统开了「减少动画」时位移直接到位；脉冲和流光只在唤醒、释放、装载、推理时出现，静止时窗口不画帧（`TestIdleWindowIsStill` 守着）。动画中间帧截图：`cd console && SNAP_DIR=<目录> go test -run MotionSnapshots`。
 - 图标：`cd console && go run ./cmd/makeicon`，用 MyGo 的画笔生成 `resources/icon.png` 和 `tray.png`。
-- 改了 `server/` 要重新唤醒才会生效：在「连接与账号」页点「重新部署服务端」，会复用同一台机器，:8081 上的模型和 MCP 转发都不会中断。
+- 改了 `server/` 要重新唤醒才会生效：在「连接」页点「重新部署服务端」，会复用同一台机器，:8081 上的模型和 MCP 转发都不会中断。
 
 ## 许可
 

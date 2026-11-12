@@ -68,7 +68,7 @@ site-packages\\, bridge\\ and server\\. Move or copy the whole folder anywhere; 
 move the exe out of it.
 
 - Settings and state are kept in %LOCALAPPDATA%\\Colab-yoga (not in this folder).
-- First time: open "Connection & Account" and bind your Google account.
+- First time: the window opens on a sign-in page; sign in with your Google account there.
 - To start models, colab-gpu-llm-service's colab_kernel.py needs to export its
   colab_kernel_runners.json (it holds your API keys) next to Colab-yoga.exe. This package
   ships without it, on purpose.
@@ -83,7 +83,7 @@ Colab-yoga {version}（Windows x64，免安装）
 整个文件夹可以放到任何位置，但不要把 exe 单独拿出去。
 
 - 设置和状态保存在 %LOCALAPPDATA%\\Colab-yoga，不在这个文件夹里。
-- 第一次使用：在「连接与账号」页绑定 Google 账号。
+- 第一次使用：窗口打开就是登录页，在那里用 Google 账号登录。
 - 要启动模型，需要 colab-gpu-llm-service 的 colab_kernel.py 把 colab_kernel_runners.json
   （含你的 API 密钥）导出到 Colab-yoga.exe 旁边。本包不带这个文件，是故意的。
 - 给 AI agent（Claude Code、Codex 等）用：把 skills\\colab-yoga\\ 整个文件夹复制到 agent 的

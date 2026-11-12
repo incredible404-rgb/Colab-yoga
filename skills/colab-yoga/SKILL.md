@@ -28,7 +28,7 @@ Run `auth_status` first. If it already says `"logged_in": true`, do not bind aga
 1. `"<app>\runtime\python.exe" -X utf8 "<app>\bridge\colab_yoga_bridge.py" auth_url` prints `{"ok": true, "auth_url": ...}`. Give the user that link; they authorise in their browser and copy the code shown.
 2. Pass the code they paste back: `... colab_yoga_bridge.py auth_code <code>`. Done when it answers `"logged_in": true`. The code is single-use and secret: pass it straight through, never log or repeat it. Authorising the same account again keeps the running sessions; for a different account only the session records it does not hold are dropped.
 
-The console's **连接与账号 / Connection & Account** page does the same with a button.
+The console does the same with a button: its sign-in page when no account is bound, and afterwards the account menu at the foot of the left rail (换号 / switch account).
 
 ## Operate
 

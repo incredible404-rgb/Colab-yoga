@@ -73,8 +73,9 @@ It stages the package the same way an install does, in a temporary directory, zi
 
 - Launch **Colab-yoga** from the Start menu or desktop shortcut. Only a single instance runs: launching it again brings the existing window to the front.
 - Closing the window hides it to the system tray without affecting the GPU. The tray tooltip shows billing status and current CU balance; the right-click menu provides shortcuts to open web chat, extend time, release the GPU (opens a confirmation prompt first), and quit.
-- First-time setup: bind your Google account on the **Connection & Account** page. Clicking **Bind** opens your browser; after authorizing, paste the authorization code back into the console. The token is shared with colab-gpu-llm-service (`~/.config/colab-cli/token.json`), so if an account is already bound there is nothing to bind; authorizing the same account again leaves the running sessions alone.
-- The access address (the Tailscale Service host) is picked up from the scripts in the model list file (`SERVICE_FQDN` first, then any `*.ts.net` host). If it cannot be recognized, enter it by hand under **Connection & Account → Access addresses**.
+- First-time setup: until a Google account is bound, the window is a sign-in page and nothing else. **Sign in with Google** opens your browser; after authorizing, paste the authorization code back. From then on the account sits at the foot of the left rail, where its menu switches accounts, refreshes the balance, or signs out. The token is shared with colab-gpu-llm-service (`~/.config/colab-cli/token.json`), so if an account is already bound there is nothing to bind; authorizing the same account again leaves the running sessions alone.
+- The steps of a session are in the top bar, left to right: **Wake G4** (its arrow picks another GPU) → **Load model** → **Open web chat** → **Keep alive** → **Release**. Only the next step is a filled button; a button that cannot be used now is gray and says why under the pointer. A wake and a model load show their progress stage by stage in the dashboard's **Current model** card; a failed wake stops at the stage that failed and says why.
+- The access address (the Tailscale Service host) is picked up from the scripts in the model list file (`SERVICE_FQDN` first, then any `*.ts.net` host). If it cannot be recognized, enter it by hand under **Connection → Access addresses**.
 - Instance keepalive is handled by an independent `keeper` process, so closing or exiting the console does not interrupt a running GPU; a command-line `bridge wake` also starts the keeper itself once the server is up. The server's control calls (load, unload, idle timer, release) need a random Bearer token that wake delivers and stores in `%LOCALAPPDATA%\Colab-yoga\server_token.json`; only `GET /api/status` is open. The cloud watchdog counts activity across web chat, Magpie, and MCP as active usage, releasing the instance only after the configured idle timeout (default: 30 minutes), with a system notification 5 minutes before release.
 
 ## Development
@@ -91,9 +92,10 @@ py -3 tools/install.py
 Once installed you can also run the installer with the bundled runtime: `runtime/python.exe -X utf8 tools/install.py` (it has no pip of its own, so this only works while the dependencies are already in place).
 
 - Visual snapshot self-check: `cd console && SNAP_DIR=<dir> go test -run Snapshots` outputs PNG snapshots across dark/light themes, window sizes, and UI states.
+- README animation: `cd console && FRAMES_DIR=<dir> go test -run ReadmeFrames` writes the frames of one whole session (wake, load a model, switch theme); assembled, they are `docs/motion.gif`.
 - Motion lives in `console/motion.go`: movement rides springs (a second click mid-flight turns with its velocity), colors and opacity ease on short curves, and movement jumps to its place when the desktop asks for less motion. Pulses and shimmers run only during wake, release, model load and inference; an idle window draws no frames (guarded by `TestIdleWindowIsStill`). Mid-animation screenshots: `cd console && SNAP_DIR=<dir> go test -run MotionSnapshots`.
 - Icons: `cd console && go run ./cmd/makeicon` renders `resources/icon.png` and `tray.png` using MyGo's canvas API.
-- Changes under `server/` take effect on the next wake or via **Redeploy Server** on the **Connection & Account** page, which reuses the running VM without interrupting the model or MCP forwarding on `:8081`.
+- Changes under `server/` take effect on the next wake or via **Redeploy Server** on the **Connection** page, which reuses the running VM without interrupting the model or MCP forwarding on `:8081`.
 
 ## License
 

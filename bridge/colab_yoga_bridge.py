@@ -597,7 +597,7 @@ def _release_fresh_session(session: SessionState):
     try:
         state.client.unassign(session.endpoint)
     except Exception as e:
-        print(f"WAKE_LOG: ⚠️ 释放新实例失败（{type(e).__name__}），请在 Colab 页面或点「释放全部实例」确认它已停。", flush=True)
+        print(f"WAKE_LOG: ⚠️ 释放新实例失败（{type(e).__name__}），请在 Colab 页面或点「释放」确认它已停。", flush=True)
     try:
         state.prune_session(session.name)
     except Exception:
@@ -680,7 +680,7 @@ def cmd_wake(gpu_type: str = "G4", server_py_path: str = None, app_py_path: str 
                 if not _wait_for_runtime_ready(target_session, timeout_s=90):
                     print(
                         "WAKE_ERROR: 已有实例仍在计费，但暂时连不上；为免误删上面正在运行的模型，没有自动释放。"
-                        "请稍后再点「唤醒实例并部署」；确定不用了再点「释放全部实例」。",
+                        "请稍后再点「重新部署」；确定不用了再点「释放」。",
                         flush=True,
                     )
                     return False
