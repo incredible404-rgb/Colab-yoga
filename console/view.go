@@ -8,8 +8,8 @@ import (
 	"github.com/egoist/mygo/ui"
 )
 
-// view is the whole window: a top bar that never scrolls (status, money, and the step
-// that comes next), a left rail (pages, model library, account), the page, and a log
+// view is the whole window: a top bar that never scrolls (status and the session's
+// steps), a left rail (pages, model library, account), the page, and a log
 // drawer. Until a Google account is bound it is the sign-in page alone.
 func (a *App) view(c *ui.Context) {
 	root := ui.Column(c).Fill()
@@ -73,9 +73,10 @@ func (a *App) busy() bool {
 
 // ─── Top bar ──────────────────────────────────────────────────────────────────
 
-// The buttons follow a session from left to right: wake, load a model and chat, keep
-// alive, release. At any time the one filled button is the step that comes next; what
-// cannot be used now is gray and says why under the pointer.
+// The buttons follow a session from left to right: wake, load a model, chat, keep alive,
+// release. At any time the one filled button is the step that comes next; a step that is
+// done keeps its place, dimmed and ticked; what cannot be used now is gray and says why
+// under the pointer. Money is not here: the bill card and the tray's tooltip show it.
 func (a *App) topBar(c *ui.Context, p Palette) {
 	ui.Row(c).Height(60).PaddingX(22).Gap(14).Background(p.Panel).
 		BorderWidth(0, 0, 1, 0).BorderColor(p.Border).Children(func() {
@@ -89,16 +90,8 @@ func (a *App) topBar(c *ui.Context, p Palette) {
 			ui.Text(c.Key("wake-clock"), a.wakeElapsed()).Font(fontMono).FontFeatures("tnum").FontSize(13).NoWrap().
 				TextColor(p.Text3).ContentTransition(numeric)
 		}
-		if a.acct.Known && a.acct.LoggedIn {
-			rate, _, _ := a.burnRate(a.now())
-			text := "余额 " + thousands(a.balance()) + " CU"
-			if rate > 0 {
-				text += fmt.Sprintf(" · %.2f CU/h", rate)
-			}
-			money := ui.Text(c, text).Font(fontMono).FontFeatures("tnum").FontSize(13).NoWrap().ContentTransition(numericDown)
-			money.TextColor(money.AnimateColor("c", map[bool]ui.Color{true: p.Accent, false: p.Text2}[a.acct.Burn > 0], fadeColor))
-		}
 		a.wakeSlot(c, p)
+		a.loadSlot(c, p)
 		a.chatSlot(c, p)
 		a.keepButton(c, p)
 		off := ""
@@ -182,25 +175,12 @@ func (a *App) wakeOff() string {
 	return ""
 }
 
-// slotMotion opens and closes a top-bar slot along the bar, so its neighbors glide
-// aside instead of jumping.
-var slotMotion = ui.ElementTransition{
-	Animation:    &springSize,
-	Enter:        &ui.Motion{Collapse: true},
-	Exit:         &ui.Motion{Collapse: true},
-	ExitDuration: 160 * time.Millisecond,
-	ExitEase:     ui.EaseOut,
-}
-
 // wakeSlot holds the first step of every session: a split button that wakes the
 // remembered GPU (its arrow picks another), the wake in flight, or a redeploy when a
-// runtime bills without its server. With a server connected there is nothing to wake
-// and the slot closes.
+// runtime bills without its server. With a server connected the step is done: it keeps
+// its place, dimmed and ticked.
 func (a *App) wakeSlot(c *ui.Context, p Palette) {
-	if a.connected && !a.waking {
-		return
-	}
-	ui.Row(c.Key("wake-slot")).Gap(1).Transition(slotMotion).Children(func() {
+	ui.Row(c.Key("wake-slot")).Gap(1).MinWidth(104).Children(func() {
 		off := a.wakeOff()
 		switch {
 		case a.waking:
@@ -208,9 +188,12 @@ func (a *App) wakeSlot(c *ui.Context, p Palette) {
 			if a.redeploying {
 				label = "部署中…"
 			}
-			busyButton(c.Key("waking"), p, label)
+			busyButton(c.Key("waking"), p, label).Grow(1)
+		case a.connected:
+			doneStep(c.Key("woken"), p, "已唤醒").Grow(1).
+				Tooltip("实例在运行。要重启服务端，去「连接」页点「重新部署服务端」")
 		case a.acct.Active > 0:
-			act(warnButton(c.Key("redeploy"), p, "重新部署").
+			act(warnButton(c.Key("redeploy"), p, "重新部署").Grow(1).
 				Tooltip("实例在计费但服务端没连上：复用这台机器重启服务端，:8081 上的模型不受影响"), p, off, a.wake)
 		default:
 			// Filled only as the next step: a model already answering on the tailnet makes
@@ -219,7 +202,7 @@ func (a *App) wakeSlot(c *ui.Context, p Palette) {
 			if _, _, online := a.servedModel(); online {
 				button = outlineButton
 			}
-			act(button(c.Key("wake"), p, "唤醒 "+a.gpu).Radius(8, 0, 0, 8).Padding(7, 12, 7, 16), p, off, a.wake)
+			act(button(c.Key("wake"), p, "唤醒 "+a.gpu).Grow(1).Radius(8, 0, 0, 8).Padding(7, 12, 7, 16), p, off, a.wake)
 			arrow := button(c.Key("wake-gpu"), p, "▾").Radius(0, 8, 8, 0).Padding(7, 9).Label("选择 GPU 型号")
 			if off != "" {
 				act(arrow, p, off, nil)
@@ -236,11 +219,15 @@ func (a *App) wakeSlot(c *ui.Context, p Palette) {
 	})
 }
 
-// chatSlot holds the steps after the wake in one place of steady width: load a model,
-// watch it load, open the chat.
-func (a *App) chatSlot(c *ui.Context, p Palette) {
+// loadSlot holds the second step: choose a model and load it (loadPicker), then the load
+// in flight. Once a model serves the step is done and keeps its place, as the wake does.
+func (a *App) loadSlot(c *ui.Context, p Palette) {
 	const w = 116
-	_, _, online := a.servedModel()
+	id, alias, online := a.servedModel()
+	picking := a.connected && !online && !a.loadingModel() && len(a.catalog) > 0
+	if !picking {
+		a.pickOpen = false // the library does not spring open again when the step comes back
+	}
 	switch {
 	case a.loadingModel():
 		label := "装载中…"
@@ -249,28 +236,137 @@ func (a *App) chatSlot(c *ui.Context, p Palette) {
 		}
 		busyButton(c.Key("loading"), p, label).MinWidth(w)
 	case online:
-		off := ""
-		if a.tsURL == "" {
-			off = "没配置 Tailscale 地址：去「连接」页填写"
+		name := alias
+		if m := a.modelByID(id); m != nil {
+			name = m.Name
 		}
-		act(inkButton(c.Key("web"), p, "打开网页对话").MinWidth(w), p, off, a.openWeb)
+		doneStep(c.Key("loaded"), p, "已加载").MinWidth(w).
+			Tooltip("正在运行 " + name + "。换模型用左栏，或「当前模型」卡的「切换模型」")
+	case picking:
+		a.loadPicker(c, p, w)
 	case a.connected:
-		load := inkButton(c.Key("load"), p, "加载模型 ▾").MinWidth(w)
-		if len(a.catalog) == 0 {
-			act(load, p, "模型库是空的："+noModelsHint, nil)
-			return
-		}
-		load.Menu(a.modelMenu("", false))
+		act(inkButton(c.Key("load"), p, "加载模型").MinWidth(w), p, "模型库是空的："+noModelsHint, nil)
 	default:
-		off := "先唤醒实例并加载模型"
+		off := "先唤醒实例"
 		switch {
 		case a.waking:
-			off = "唤醒完成并加载模型后可用"
+			off = "唤醒完成后可用"
 		case a.acct.Active > 0:
 			off = "云端服务端没连上：找回地址或重新部署后可用"
 		}
-		act(outlineButton(c.Key("web"), p, "打开网页对话").MinWidth(w), p, off, nil)
+		act(outlineButton(c.Key("load"), p, "加载模型").MinWidth(w), p, off, nil)
 	}
+}
+
+// loadPicker is the load button with nothing loaded yet. A first model is chosen every
+// session and is most often the one that ran last, so the first click opens the library
+// with that model chosen and turns the button into the confirmation: two clicks on the
+// same spot load what ran before. Choosing another model in the library is one click
+// more, and a click elsewhere backs out. Nothing runs yet for a load to interrupt, so
+// there is no dialog.
+func (a *App) loadPicker(c *ui.Context, p Palette, w float32) {
+	if a.pickOpen && a.modelByID(a.pickID) == nil {
+		a.pickID = a.defaultPick() // the library changed under the open list
+	}
+	label := "加载模型"
+	if a.pickOpen {
+		label = "加载所选"
+		if a.pickID == a.lastModel {
+			label = "加载上次使用"
+		}
+	}
+	b := inkButton(c.Key("load"), p, label).MinWidth(w).OnClick(func() {
+		if !a.pickOpen {
+			a.pickID, a.pickOpen = a.defaultPick(), true
+			return
+		}
+		a.pickOpen = false
+		a.switchTo(a.pickID)
+	})
+	if !a.pickOpen {
+		b.Tooltip("选择要加载的模型，默认是上次用的那个")
+	}
+	ui.Popover(c, b, &a.pickOpen, func() {
+		ui.Column(c).Width(400).Padding(8).Gap(2).Children(func() {
+			for i := range a.catalog {
+				a.pickRow(c, p, &a.catalog[i])
+			}
+			ui.Text(c, "再点一次顶栏的按钮开始加载；下载并装载要几分钟。").FontSize(12).TextColor(p.Text3).Pretty().
+				Margin(6, 10, 4, 10)
+		})
+	})
+}
+
+// pickRow is a model in the load button's library: a radio row that chooses it.
+func (a *App) pickRow(c *ui.Context, p Palette, m *Model) {
+	on := m.ID == a.pickID
+	row := ui.Row(c.Key("pick-"+m.ID)).Padding(8, 10).Radius(8).Gap(10).AlignItems(ui.Center).
+		Cursor(ui.CursorPointer).Role(ui.RoleButton).Label("选择 " + m.Name)
+	bg := p.Raised.Alpha(0)
+	switch {
+	case on:
+		bg = p.Raised
+	case row.Hovered():
+		bg = p.Raised.Alpha(0.55)
+	}
+	id := m.ID
+	row.Background(bg).Transition(colorMotion).OnClick(func() { a.pickID = id }).Children(func() {
+		ring := p.BorderStrong
+		if on {
+			ring = p.Accent
+		}
+		ui.Box(c).Size(14, 14).Radius(7).Border(1.5, ring).Justify(ui.Center).AlignItems(ui.Center).
+			Transition(colorMotion).Children(func() {
+			if on {
+				ui.Box(c.Key("dot")).Size(6, 6).Radius(3).Background(p.Accent).Transition(popIn)
+			}
+		})
+		ui.Text(c, m.Name).FontSize(13).FontWeight(map[bool]int{true: 650, false: 500}[on]).SingleLine().
+			Grow(1).Shrink(1).MinWidth(40).Tooltip(m.Name)
+		if m.ID == a.lastModel {
+			ui.Text(c, "上次使用").FontSize(12).TextColor(p.Accent).NoWrap()
+		}
+		if m.SizeGB > 0 {
+			ui.Text(c, fmt.Sprintf("%.0f GB", m.SizeGB)).Font(fontMono).FontFeatures("tnum").FontSize(12).TextColor(p.Text3).NoWrap()
+		}
+	})
+}
+
+// defaultPick is the model the load button offers first: the one loaded last time, else
+// the first of the library.
+func (a *App) defaultPick() string {
+	if a.modelByID(a.lastModel) != nil {
+		return a.lastModel
+	}
+	if len(a.catalog) > 0 {
+		return a.catalog[0].ID
+	}
+	return ""
+}
+
+// chatSlot holds the third step: open the chat with the model that serves.
+func (a *App) chatSlot(c *ui.Context, p Palette) {
+	_, _, online := a.servedModel()
+	off := "先唤醒实例并加载模型"
+	switch {
+	case online && a.tsURL == "":
+		off = "没配置 Tailscale 地址：去「连接」页填写"
+	case online:
+		off = ""
+	case a.loadingModel():
+		off = "模型装载完成后可用"
+	case a.connected:
+		off = "先加载模型"
+	case a.waking:
+		off = "唤醒完成并加载模型后可用"
+	case a.acct.Active > 0:
+		off = "云端服务端没连上：找回地址或重新部署后可用"
+	}
+	button := outlineButton
+	if online {
+		button = inkButton
+	}
+	act(button(c.Key("web"), p, "打开网页对话"), p, off, a.openWeb)
 }
 
 // modelMenu lists the model library; choosing a model asks before it replaces what runs.
@@ -289,6 +385,7 @@ func (a *App) modelMenu(cur string, online bool) func(*ui.Menu) {
 // keepButton resets the idle countdown. In the last five minutes before the automatic
 // release it turns to the warning color and counts down itself.
 func (a *App) keepButton(c *ui.Context, p Palette) {
+	const keepWidth = 90 // room for the countdown, so the bar does not shift when it starts
 	label, urgent := "续时", false
 	if st := a.status; st != nil && a.connected && st.IdleTimeoutMin > 0 && st.IdleRemaining >= 0 {
 		if rem := int(a.idleRemainingAt(a.now())); rem <= 300 {
@@ -300,10 +397,10 @@ func (a *App) keepButton(c *ui.Context, p Palette) {
 		off = "没有连上的实例，不需要续时"
 	}
 	if urgent {
-		act(warnButton(c.Key("touch"), p, label).Label("续时").Tooltip("快被自动释放了：点一下重置闲置倒计时"), p, off, a.touch)
+		act(warnButton(c.Key("touch"), p, label).MinWidth(keepWidth).Label("续时").Tooltip("快被自动释放了：点一下重置闲置倒计时"), p, off, a.touch)
 		return
 	}
-	act(outlineButton(c.Key("touch"), p, label).Tooltip("重置闲置自动释放倒计时"), p, off, a.touch)
+	act(outlineButton(c.Key("touch"), p, label).MinWidth(keepWidth).Tooltip("重置闲置自动释放倒计时"), p, off, a.touch)
 }
 
 // ─── Left rail ────────────────────────────────────────────────────────────────
@@ -577,7 +674,11 @@ func (a *App) dialogs(c *ui.Context) {
 		"会立即停止扣费；云端的模型、网页对话、Magpie 和 MCP 都会断开。", "取消", "释放") == 1 {
 		a.release()
 	}
-	if ui.AlertDialog(c, &a.askSwitch, "切换到 "+a.modelName(a.switchTarget)+"？", a.switchCost(), "取消", "切换") == 1 {
+	title, yes := "切换到 "+a.modelName(a.switchTarget)+"？", "切换"
+	if _, _, online := a.servedModel(); !online {
+		title, yes = "加载 "+a.modelName(a.switchTarget)+"？", "加载" // nothing runs to be switched from
+	}
+	if ui.AlertDialog(c, &a.askSwitch, title, a.switchCost(), "取消", yes) == 1 {
 		a.switchTo(a.switchTarget)
 	}
 }
@@ -701,6 +802,17 @@ func act(b ui.Element, p Palette, off string, fn func()) ui.Element {
 	}
 	return b.AccessDisabled(true).Cursor(ui.CursorDefault).Background(ui.Transparent).Border(1, ui.Transparent).
 		TextColor(p.Off).AnimatePose(ui.Pose{}, springLift).Tooltip(off)
+}
+
+// doneStep stands where a step's button was once the step is done: dimmed and ticked, it
+// keeps its place in the bar, so the session still reads from left to right.
+func doneStep(c *ui.Context, p Palette, label string) ui.Element {
+	tick := p.Success
+	return ui.Row(c).Padding(7, 14).Radius(8).Gap(6).Justify(ui.Center).AlignItems(ui.Center).
+		Border(1, ui.Transparent).Label(label).Children(func() {
+		tickMark(c, tick)
+		ui.Text(c, label).FontSize(13).FontWeight(600).TextColor(p.Text3).NoWrap()
+	})
 }
 
 // busyButton stands where a button will be while its job runs: nothing to click, and a

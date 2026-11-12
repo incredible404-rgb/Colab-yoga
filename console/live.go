@@ -135,6 +135,14 @@ func stageTrack(c *ui.Context, p Palette, key string, names []string, cur int, f
 	})
 }
 
+// tickMark draws the tick of what is done.
+func tickMark(c *ui.Context, col ui.Color) ui.Element {
+	return ui.Box(c).Size(12, 12).Draw(func(pt *ui.Painter, r ui.Rect) {
+		pt.Line(r.X+1.6, r.Y+6.4, r.X+4.8, r.Y+9.4, 1.8, col)
+		pt.Line(r.X+4.8, r.Y+9.4, r.X+10.4, r.Y+2.8, 1.8, col)
+	})
+}
+
 func stageNode(c *ui.Context, p Palette, n int, done, on, failed bool) {
 	const d = 22
 	bg, border, fg, width := ui.Transparent, p.BorderStrong, p.Muted, float32(1)
@@ -164,10 +172,7 @@ func stageNode(c *ui.Context, p Palette, n int, done, on, failed bool) {
 		}
 		switch {
 		case done:
-			ui.Box(c.Key("tick")).Size(12, 12).Draw(func(pt *ui.Painter, r ui.Rect) {
-				pt.Line(r.X+1.6, r.Y+6.4, r.X+4.8, r.Y+9.4, 1.8, fg)
-				pt.Line(r.X+4.8, r.Y+9.4, r.X+10.4, r.Y+2.8, 1.8, fg)
-			})
+			tickMark(c.Key("tick"), fg)
 		case failed:
 			ui.Text(c.Key("mark"), "!").FontSize(13).FontWeight(700).TextColor(fg)
 		default:

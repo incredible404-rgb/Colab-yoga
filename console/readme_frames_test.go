@@ -82,7 +82,14 @@ func TestReadmeFrames(t *testing.T) {
 	play(1100*time.Millisecond, 1)
 
 	// A model is asked for: it downloads, loads into VRAM, and answers.
-	a.switching, a.switchAt = "gemma4-31b", a.now()
+	a.lastModel = "gemma4-31b"
+	if err := tt.Click("加载模型"); err != nil {
+		t.Fatal(err)
+	}
+	play(1300*time.Millisecond, 1)
+	if err := tt.Click("加载上次使用"); err != nil {
+		t.Fatal(err)
+	}
 	st.IsDownloading = true
 	for p := 0.08; p < 1; p += 0.13 {
 		st.TaskProgress = p

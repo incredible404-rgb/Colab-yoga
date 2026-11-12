@@ -285,7 +285,7 @@ func (a *App) modelCard(c *ui.Context, p Palette) ui.Element {
 		case failed:
 			head, col, hint = "唤醒失败", p.Text, ""
 		case a.connected:
-			head, hint = "实例已就绪，还没有模型", "点顶栏的「加载模型 ▾」选一个，下载并装载要几分钟。"
+			head, hint = "实例已就绪，还没有模型", "点顶栏的「加载模型」，默认选中上次用的那个，再点一次就开始。"
 		case a.acct.Active > 0:
 			head, hint = "实例在计费，服务端没连上", "正在自动找回服务地址；找不回就点顶栏的「重新部署」，会复用这台机器。"
 		}

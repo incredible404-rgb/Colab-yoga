@@ -65,7 +65,7 @@ func TestControlsFitTheWindow(t *testing.T) {
 	for _, size := range [][2]int{{1440, 900}, {1000, 660}, {1024, 640}, {1920, 1080}} {
 		a := fakeApp(t)
 		tt := ui.NewTesterWith(a.view, size[0], size[1], ui.TesterOptions{Dark: true})
-		for _, label := range []string{"打开网页对话", "续时", "释放", "日志", "切换模型 ▾", "卸载", "仪表盘", "连接", "账号", "切换到浅色"} {
+		for _, label := range []string{"已唤醒", "已加载", "打开网页对话", "续时", "释放", "日志", "切换模型 ▾", "卸载", "仪表盘", "连接", "账号", "切换到浅色"} {
 			r, ok := tt.Find(label)
 			if ok && r.W == 0 && r.Y >= float32(size[1]) {
 				continue // below the fold: the page scrolls vertically, never sideways
@@ -364,6 +364,14 @@ func TestSnapshots(t *testing.T) {
 		{"state2_wake_failed_dark_1024", 1024, 640, stateWakeFailed},
 		{"state3_lost_dark_1024", 1024, 640, stateLost},
 		{"state4_nomodel_dark_1024", 1024, 640, stateNoModel},
+		{"state4_picker_dark_1024", 1024, 640, func(a *App) {
+			stateNoModel(a)
+			a.lastModel, a.pickID, a.pickOpen = "gemma4-31b", "gemma4-31b", true
+		}},
+		{"state4_picker_light_1024", 1024, 640, func(a *App) {
+			stateNoModel(a)
+			a.themeName, a.lastModel, a.pickID, a.pickOpen = "light", "gemma4-31b", "qwen38-huihui-v2", true
+		}},
 		{"state5_loading_dark_1024", 1024, 640, stateLoading},
 		{"state6_online_dark_1024", 1024, 640, nil},
 		{"state6_online_light_1024", 1024, 640, func(a *App) { a.themeName = "light" }},

@@ -106,27 +106,27 @@ func TestTopBarFollowsTheSession(t *testing.T) {
 		inert        []string          // shown, but a click changes nothing
 		releaseReady bool
 	}{
-		{"no instance", stateIdle, []string{"唤醒 G4", "选择 GPU 型号", "打开网页对话", "续时", "释放", "没有实例 · 不计费"},
-			[]string{"加载模型 ▾", "重新部署"}, 1, "唤醒 G4", func(a *App) bool { return a.waking },
-			[]string{"打开网页对话", "续时", "释放"}, false},
-		{"waking", stateWaking, []string{"唤醒中…", "正在部署服务端…", "01:18", "打开网页对话", "释放"},
-			[]string{"唤醒 G4", "选择 GPU 型号", "加载模型 ▾"}, 0, "", nil, []string{"打开网页对话", "续时"}, true},
-		{"billing without its server", stateLost, []string{"重新部署", "打开网页对话", "释放"},
-			[]string{"唤醒 G4", "加载模型 ▾"}, 0, "重新部署", func(a *App) bool { return a.waking },
-			[]string{"打开网页对话", "续时"}, true},
-		{"connected, no model", stateNoModel, []string{"加载模型 ▾", "续时", "释放", "10.05 CU/h"},
-			[]string{"唤醒 G4", "选择 GPU 型号", "重新部署", "打开网页对话"}, 1, "", nil, nil, true},
-		{"loading a model", stateLoading, []string{"装载中 46%", "续时", "释放"},
-			[]string{"唤醒 G4", "加载模型 ▾", "打开网页对话"}, 0, "", nil, nil, true},
-		{"model online", nil, []string{"打开网页对话", "续时", "释放"},
-			[]string{"唤醒 G4", "选择 GPU 型号", "加载模型 ▾", "重新部署"}, 1, "打开网页对话",
+		{"no instance", stateIdle, []string{"唤醒 G4", "选择 GPU 型号", "加载模型", "打开网页对话", "续时", "释放", "没有实例 · 不计费"},
+			[]string{"重新部署", "已唤醒", "已加载"}, 1, "唤醒 G4", func(a *App) bool { return a.waking },
+			[]string{"加载模型", "打开网页对话", "续时", "释放"}, false},
+		{"waking", stateWaking, []string{"唤醒中…", "正在部署服务端…", "01:18", "加载模型", "打开网页对话", "释放"},
+			[]string{"唤醒 G4", "选择 GPU 型号", "已唤醒", "已加载"}, 0, "", nil, []string{"加载模型", "打开网页对话", "续时"}, true},
+		{"billing without its server", stateLost, []string{"重新部署", "加载模型", "打开网页对话", "释放"},
+			[]string{"唤醒 G4", "已唤醒", "已加载"}, 0, "重新部署", func(a *App) bool { return a.waking },
+			[]string{"加载模型", "打开网页对话", "续时"}, true},
+		{"connected, no model", stateNoModel, []string{"已唤醒", "加载模型", "打开网页对话", "续时", "释放"},
+			[]string{"唤醒 G4", "选择 GPU 型号", "重新部署", "已加载"}, 1, "", nil, []string{"打开网页对话"}, true},
+		{"loading a model", stateLoading, []string{"已唤醒", "装载中 46%", "打开网页对话", "续时", "释放"},
+			[]string{"唤醒 G4", "加载模型", "已加载"}, 0, "", nil, []string{"打开网页对话"}, true},
+		{"model online", nil, []string{"已唤醒", "已加载", "打开网页对话", "续时", "释放"},
+			[]string{"唤醒 G4", "选择 GPU 型号", "加载模型", "重新部署"}, 1, "打开网页对话",
 			func(a *App) bool { return len(a.opened) == 1 && a.opened[0] == a.tsURL }, nil, true},
-		{"online, no address to open", func(a *App) { a.tsURL = "" }, []string{"打开网页对话", "续时", "释放"},
-			[]string{"唤醒 G4", "加载模型 ▾"}, 0, "", nil, []string{"打开网页对话"}, true},
-		{"account not read yet", func(a *App) { stateIdle(a); a.acct = Account{} }, []string{"唤醒 G4", "正在查询 Colab 账号…", "释放"},
-			[]string{"加载模型 ▾", "重新部署"}, 0, "", nil, []string{"唤醒 G4", "打开网页对话", "续时", "释放"}, false},
-		{"releasing", func(a *App) { a.releasing = true }, []string{"正在释放实例…", "打开网页对话", "释放"},
-			[]string{"唤醒 G4", "加载模型 ▾"}, 1, "", nil, []string{"释放"}, false},
+		{"online, no address to open", func(a *App) { a.tsURL = "" }, []string{"已唤醒", "已加载", "打开网页对话", "续时", "释放"},
+			[]string{"唤醒 G4", "加载模型"}, 0, "", nil, []string{"打开网页对话"}, true},
+		{"account not read yet", func(a *App) { stateIdle(a); a.acct = Account{} }, []string{"唤醒 G4", "正在查询 Colab 账号…", "加载模型", "释放"},
+			[]string{"重新部署", "已唤醒", "已加载"}, 0, "", nil, []string{"唤醒 G4", "加载模型", "打开网页对话", "续时", "释放"}, false},
+		{"releasing", func(a *App) { a.releasing = true }, []string{"正在释放实例…", "已唤醒", "已加载", "打开网页对话", "释放"},
+			[]string{"唤醒 G4", "加载模型"}, 1, "", nil, []string{"释放"}, false},
 	}
 	for _, s := range states {
 		for _, width := range []int{1440, 1024} {
@@ -146,9 +146,24 @@ func TestTopBarFollowsTheSession(t *testing.T) {
 					t.Errorf("%s @%d: %q should not show", s.name, width, gone)
 				}
 			}
-			// Not billing, the top bar shows the balance alone, without a rate of 0.00 CU/h.
-			if r, ok := tt.Find("余额 2,795.70 CU"); ok != (a.acct.Known && a.acct.Burn == 0) || (ok && r.Y > 60) {
-				t.Errorf("%s @%d: balance without a rate shown=%v at %+v, burn %.2f", s.name, width, ok, r, a.acct.Burn)
+			// Money is the bill card's: the bar shows neither the balance nor the rate.
+			for _, text := range tt.Texts() {
+				if strings.HasPrefix(text, "余额 ") {
+					t.Errorf("%s @%d: the top bar should not show %q", s.name, width, text)
+				}
+			}
+			// The three steps keep their places in order, whatever state each is in.
+			at := func(labels ...string) float32 {
+				for _, l := range labels {
+					if r, ok := tt.Find(l); ok && r.Y < 60 {
+						return r.X
+					}
+				}
+				t.Errorf("%s @%d: none of %q is in the top bar", s.name, width, labels)
+				return -1
+			}
+			if wake, load, chat := at("唤醒 G4", "唤醒中…", "重新部署", "已唤醒"), at("加载模型", "装载中 46%", "已加载"), at("打开网页对话"); !(wake < load && load < chat) {
+				t.Errorf("%s @%d: the steps must stay in order: wake %.0f, load %.0f, chat %.0f", s.name, width, wake, load, chat)
 			}
 			for _, label := range []string{"续时", "释放", "日志"} {
 				if r, ok := tt.Find(label); !ok || r.W <= 0 || r.X+r.W > float32(width)+0.5 || r.Y > 60 {
@@ -206,21 +221,88 @@ func TestWakeButtonPicksTheGPU(t *testing.T) {
 	}
 }
 
-func TestLoadModelFromTheTopBarAsksFirst(t *testing.T) {
-	a := fakeApp(t)
+// TestLoadButtonOffersTheLastModelFirst: the first click on the load button opens the
+// library with the model loaded last time chosen and makes the button the confirmation;
+// the second click loads it. Another model is one click more, and a click elsewhere
+// backs out with nothing loaded.
+func TestLoadButtonOffersTheLastModelFirst(t *testing.T) {
+	open := func() (*App, *ui.Tester) {
+		a := fakeApp(t)
+		stateNoModel(a)
+		a.lastModel = "gemma4-31b"
+		tt := ui.NewTesterWith(a.view, 1024, 640, ui.TesterOptions{Dark: true})
+		tt.Advance(2 * time.Second)
+		if err := tt.Click("加载模型"); err != nil {
+			t.Fatal(err)
+		}
+		tt.Frame()
+		tt.Advance(time.Second)
+		if !a.pickOpen || a.pickID != "gemma4-31b" || a.switching != "" {
+			t.Fatalf("the first click must only open the library on the last model: open=%v pick=%q switching=%q", a.pickOpen, a.pickID, a.switching)
+		}
+		return a, tt
+	}
+
+	a, tt := open()
+	for _, want := range []string{"加载上次使用", "上次使用", a.modelName("qwen38-huihui-v2"), a.modelName("gemma4-31b")} {
+		if _, ok := tt.Find(want); !ok {
+			t.Errorf("the open library lacks %q; texts %q", want, tt.Texts())
+		}
+	}
+	if _, ok := tt.Find("加载模型"); ok {
+		t.Error("with the library open the button is the confirmation, not 加载模型")
+	}
+	for _, m := range a.catalog {
+		if r, ok := tt.Find("选择 " + m.Name); !ok || r.X < 0 || r.X+r.W > 1024 || r.Y < 60 || r.Y+r.H > 640 {
+			t.Errorf("%q must be offered inside the window, under the bar: %+v (found %v)", m.Name, r, ok)
+		}
+	}
+	if err := tt.Click("加载上次使用"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if a.switching != "gemma4-31b" || a.pickOpen {
+		t.Errorf("the second click must load the last model: switching=%q open=%v", a.switching, a.pickOpen)
+	}
+	if a.askSwitch {
+		t.Error("a first load interrupts nothing and asks nothing")
+	}
+
+	a, tt = open()
+	if err := tt.Click("选择 " + a.modelName("qwen38-huihui-v2")); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	if a.pickID != "qwen38-huihui-v2" || !a.pickOpen || a.switching != "" {
+		t.Fatalf("choosing another model only chooses: pick=%q open=%v switching=%q", a.pickID, a.pickOpen, a.switching)
+	}
+	if err := tt.Click("加载所选"); err != nil {
+		t.Fatalf("%v; texts %q", err, tt.Texts())
+	}
+	tt.Frame()
+	if a.switching != "qwen38-huihui-v2" || a.pickOpen {
+		t.Errorf("the button must load the model chosen: switching=%q open=%v", a.switching, a.pickOpen)
+	}
+
+	a, tt = open()
+	tt.ClickAt(700, 520) // somewhere on the page
+	tt.Frame()
+	tt.Advance(time.Second)
+	if _, ok := tt.Find("加载模型"); a.pickOpen || a.switching != "" || !ok {
+		t.Errorf("a click elsewhere must back out: open=%v switching=%q, button back=%v", a.pickOpen, a.switching, ok)
+	}
+
+	// No model remembered, or one the library no longer lists: the first of the library.
+	a = fakeApp(t)
 	stateNoModel(a)
-	tt := ui.NewTesterWith(a.view, 1024, 640, ui.TesterOptions{Dark: true})
-	if err := tt.Click("加载模型 ▾"); err != nil {
+	a.lastModel = "gone-model"
+	tt = ui.NewTesterWith(a.view, 1024, 640, ui.TesterOptions{Dark: true})
+	if err := tt.Click("加载模型"); err != nil {
 		t.Fatal(err)
 	}
-	if got := tt.Menu(); len(got) != len(a.catalog) {
-		t.Fatalf("model menu %q for %d models", got, len(a.catalog))
-	}
-	if err := tt.ChooseMenuItem(modelLabel(&a.catalog[0])); err != nil {
-		t.Fatal(err)
-	}
-	if !a.askSwitch || a.switchTarget != a.catalog[0].ID || a.switching != "" {
-		t.Errorf("a model picked from the menu must ask in the dialog: ask=%v target=%q switching=%q", a.askSwitch, a.switchTarget, a.switching)
+	tt.Frame()
+	if _, ok := tt.Find("加载所选"); !ok || a.pickID != a.catalog[0].ID {
+		t.Errorf("with no last model the first of the library is offered: pick=%q, button=%v", a.pickID, ok)
 	}
 }
 

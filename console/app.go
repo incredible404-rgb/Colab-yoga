@@ -71,6 +71,9 @@ type App struct {
 	wakeLine          string    // the bridge's latest line, as the card shows it
 	wakeErr           string    // why the last wake failed: shown until the next wake, a connection, or dismissed
 	switchAt          time.Time // when this console asked for the model being loaded
+	lastModel         string    // the model loaded last time: what the load button offers first
+	pickOpen          bool      // the load button's library is open
+	pickID            string    // the model chosen in it
 	discovering       bool
 	switching         string // model id being loaded
 	releasing         bool
@@ -116,6 +119,7 @@ func newApp(p Paths) *App {
 	a.themeName = str(m, "consoleTheme", "dark")
 	a.ctxK = int(num(m, "qwenContextLengthK", 256))
 	a.hfToken = str(m, "hfToken", "")
+	a.lastModel = str(m, "selectedModelID", "")
 	a.urlDraft = a.serverURL
 	a.keeper = readKeeper(p.Keeper)
 	a.ledger = readLedger(p.Ledger)
@@ -621,7 +625,11 @@ func (a *App) switchTo(id string) {
 		return
 	}
 	a.switching, a.switchAt = id, a.now()
-	a.flash("正在切换到 " + a.modelName(id) + "，下载并装载要几分钟")
+	doing := "正在加载 "
+	if _, _, online := a.servedModel(); online {
+		doing = "正在切换到 "
+	}
+	a.flash(doing + a.modelName(id) + "，下载并装载要几分钟")
 	ctx := a.ctxK * 1024
 	hf := a.hfToken
 	a.once("switch", func() {
@@ -635,6 +643,7 @@ func (a *App) switchTo(id string) {
 				a.noteAuth(err)
 				return
 			}
+			a.lastModel = id
 			_ = a.set.Set(map[string]any{"selectedModelID": id})
 			a.applyStatus(st)
 		})
@@ -795,6 +804,12 @@ func (a *App) servedModel() (id, alias string, online bool) {
 			id = ""
 		}
 		return id, alias, true
+	}
+	// A connected server probes :8081 on its own machine. When it says nothing serves, the
+	// probe over the tailnet, up to ten seconds old, is not asked: it would call a model
+	// that was just unloaded or released still online.
+	if a.connected && a.status != nil && a.status.LLM != nil {
+		return "", "", false
 	}
 	if a.access.Llama.OK {
 		alias = a.access.Llama.Alias
