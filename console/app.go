@@ -57,6 +57,7 @@ type App struct {
 	acctAt            time.Time
 	ledger            Ledger
 	access            Access
+	accessEpoch       uint64
 	keeper            Keeper
 	hist              [3][]float64
 	histAt            time.Time // when the last samples came, for the charts to slide them in
@@ -478,14 +479,21 @@ func parseAccount(m map[string]any) (Account, string) {
 
 func (a *App) refreshAccess() {
 	var ts, mcp string
+	var epoch uint64
 	done := make(chan struct{})
-	a.apply(func() { ts, mcp = a.tsURL, a.mcpURL; close(done) })
+	a.apply(func() { ts, mcp, epoch = a.tsURL, a.mcpURL, a.accessEpoch; close(done) })
 	<-done
 	acc := probeAccess(ts, mcp)
-	a.apply(func() {
-		a.access = acc
-		a.reloadCatalog() // a runners file exported while the console runs shows up here
-	})
+	a.apply(func() { a.applyAccess(epoch, acc) })
+}
+
+func (a *App) applyAccess(epoch uint64, acc Access) {
+	// A probe begun before release describes an instance that no longer exists.
+	if epoch != a.accessEpoch {
+		return
+	}
+	a.access = acc
+	a.reloadCatalog() // a runners file exported while the console runs shows up here
 }
 
 // startMCP starts the local MCP by hand, from its card. The bridge's mcp_start runs in the
@@ -734,23 +742,44 @@ func (a *App) release() {
 			_, _ = a.server.Post(url, "/api/disconnect", map[string]any{})
 		}
 		m, err := a.bridge.RunJSON(90*time.Second, "stop_all")
-		a.apply(func() {
-			a.releasing = false
-			a.setServerURL("", false)
-			a.status, a.connected = nil, false
-			a.hist = [3][]float64{}
-			if err != nil {
-				a.notify("释放失败", shortErr(err))
-				return
-			}
-			a.acct.Active = int(num(m, "active_assignments", 0))
-			a.acct.Burn = num(m, "burn_rate_hourly", 0)
-			if b := num(m, "paid_balance", -1); b >= 0 {
-				a.acct.Balance, a.acctAt = b, a.now()
-			}
-			a.flash(fmt.Sprintf("已释放全部实例，当前扣费 %.2f CU/h", a.acct.Burn))
-		})
+		a.apply(func() { a.finishRelease(m, err) })
+		a.refreshAccess()
 	})
+}
+
+func (a *App) finishRelease(m map[string]any, err error) {
+	a.releasing = false
+	if err != nil {
+		a.notify("释放失败", shortErr(err))
+		return
+	}
+	if message := str(m, "error", ""); message != "" {
+		a.notify("释放失败", message)
+		return
+	}
+	active := num(m, "active_assignments", -1)
+	if active < 0 {
+		a.notify("释放未确认", "未收到剩余实例数，保留当前状态。")
+		return
+	}
+	a.acct.Active = int(active)
+	if burn := num(m, "burn_rate_hourly", -1); burn >= 0 {
+		a.acct.Burn = burn
+	}
+	if b := num(m, "paid_balance", -1); b >= 0 {
+		a.acct.Balance, a.acctAt = b, a.now()
+	}
+	if a.acct.Active > 0 {
+		a.notify("释放未完成", fmt.Sprintf("仍有 %d 台实例，当前扣费 %.2f CU/h。", a.acct.Active, a.acct.Burn))
+		return
+	}
+	a.setServerURL("", false)
+	a.status, a.connected = nil, false
+	a.hist = [3][]float64{}
+	a.acct.Burn = 0
+	a.accessEpoch++
+	a.access = Access{}
+	a.flash("已释放全部实例，当前扣费 0.00 CU/h")
 }
 
 func (a *App) wake() {

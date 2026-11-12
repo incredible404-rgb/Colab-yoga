@@ -2,6 +2,6 @@
   "name": "Colab-yoga",
   "slug": "colab-yoga",
   "identifier": "app.colab-yoga",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "copyright": "Colab-yoga (Apache-2.0; portions derived from wy51ai/easycolab)"
 }

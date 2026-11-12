@@ -442,7 +442,10 @@ func (a *App) mcpQuiet() bool {
 const mcpLocalOnly = "本机已就绪 · 云端未转发"
 
 func (a *App) mcpSummary(p Palette) (string, ui.Color) {
-	if !a.access.MCPUp && !a.access.At.IsZero() {
+	if a.access.At.IsZero() {
+		return "检查中", p.Text3
+	}
+	if !a.access.MCPUp {
 		if a.mcpQuiet() {
 			return "未启用（可选）", p.Text3
 		}
@@ -462,7 +465,10 @@ func (a *App) mcpSummary(p Palette) (string, ui.Color) {
 		}
 		return "检查中", p.Text3
 	}
-	return "—", p.Text3
+	if !a.connected {
+		return "本机已就绪 · 云端未连接", p.Text3
+	}
+	return "检查中", p.Text3
 }
 
 func chip(c *ui.Context, p Palette, text string) {
@@ -676,8 +682,10 @@ func (a *App) waysIn() []wayIn {
 		mcp.state, mcp.note = "ok", "本机工具已连通，默认工作目录见上方。"
 	case mcpText == "云端转发没起" || mcpText == "云端连不到本机":
 		mcp.state, mcp.note = "down", mcpText+"：服务端会在 15 秒内自动补上转发；仍不通就检查本机 Tailscale。"
+	case mcpText == "检查中":
+		mcp.state, mcp.note = "idle", "本机 MCP 已就绪，正在检查云端连接…"
 	default:
-		mcp.state, mcp.note = "ok", "本机 MCP 已就绪；模型运行后会检查云端到本机的连接。"
+		mcp.state, mcp.note = "idle", "本机 MCP 已就绪；尚未连接云端。"
 	}
 	if !checking && !acc.MCPUp {
 		mcp.manual = a.mcpManual()

@@ -94,7 +94,7 @@ The console looks for `COLAB_LOCAL_MCP_SCRIPT`, the `script` field in `local_mcp
 {"script": "C:/tools/colab-gpu-llm-service/scripts/local_mcp.py"}
 ```
 
-Wake starts the local bridge automatically and reuses a running instance. If it fails, choose **Start** on the dashboard's MCP card; this works without waking a GPU. Health checks verify the service identity. An unrelated listener on port 3426 is reported as a conflict and is left running.
+Wake starts the local bridge automatically and reuses a running instance. If it fails, choose **Start** on the dashboard's MCP card; this works without waking a GPU. Health checks verify the service identity. An unrelated listener on port 3426 is reported as a conflict and is left running. The card turns green only after a cloud-to-PC probe confirms reachability; local readiness, a disconnected cloud or a pending check stays gray. A confirmed release clears cached model/MCP health and rejects late results from probes started before release.
 
 `local_mcp` directly reuses Pi's `read`, `write`, `edit`, and `bash` with the current Windows user's permissions. The working directory is a default, and other accessible paths remain available. Pi session skills, rules, and approval hooks are not loaded by this bridge. Its dedicated Bearer token stays in local `~/.config/colab-cli/local-mcp.json`; configure `Authorization` once in the WebUI's private client MCP settings. Real tokens are excluded from notebooks, runners, and public WebUI defaults. See the service repository for complete setup instructions.
 

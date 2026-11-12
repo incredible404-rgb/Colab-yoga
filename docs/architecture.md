@@ -79,7 +79,11 @@ on a background thread, so an 8-second readiness wait cannot stall the kernel he
 Automatic cleanup rechecks account assignments and live CLI keepers; unknown or still-active
 accounts keep the bridge. The dashboard offers an asynchronous start independent of any GPU,
 locks the button during a request, then refreshes identity-based `/health` before presenting
-the result. A foreign listener is never considered healthy or stopped.
+the result. A foreign listener is never considered healthy or stopped. A green MCP card requires
+a confirmed cloud-to-PC probe; loopback health alone leaves it idle while cloud connectivity
+is unknown. A confirmed release invalidates both cached model/MCP health and probes started
+before release, then requests fresh access status. Failed, partial or unconfirmed releases
+retain the last known runtime instead of reporting that every allocation is gone.
 
 The local tools use a dedicated Bearer token, distinct from the cloud control token below.
 It stays in `~/.config/colab-cli/local-mcp.json` and private client settings. Public WebUI
