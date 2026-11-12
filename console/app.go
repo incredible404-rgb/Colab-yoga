@@ -65,6 +65,12 @@ type App struct {
 	logsOpen          bool
 	logsAlert         bool
 	waking            bool
+	wakeAt            time.Time // when the wake in flight began
+	redeploying       bool      // the wake in flight reuses a runtime that was already assigned
+	wakeStage         int       // index into wakeStages
+	wakeLine          string    // the bridge's latest line, as the card shows it
+	wakeErr           string    // why the last wake failed: shown until the next wake, a connection, or dismissed
+	switchAt          time.Time // when this console asked for the model being loaded
 	discovering       bool
 	switching         string // model id being loaded
 	releasing         bool
@@ -83,6 +89,7 @@ type App struct {
 	authBusy          bool
 	askLogout         bool
 	toast             string
+	toastUndo         func()   // with it, the toast carries an Undo button
 	clip              string   // last text copied (tests read it)
 	opened            []string // URLs and folders handed to the shell (tests read it)
 	toastAt           time.Time
@@ -216,14 +223,14 @@ func (a *App) step() {
 	}
 }
 
-// secondHand redraws a shown, connected window once a second so the idle countdown and the
-// uptime run on between polls (applyStatus re-anchors them on every poll). Nothing is drawn
-// while only the tray icon shows.
+// secondHand redraws a shown window once a second while it has a clock to run: connected,
+// the idle countdown and the uptime between polls (applyStatus re-anchors them on every
+// poll); waking, the time the wake has taken. Nothing is drawn while only the tray icon shows.
 func (a *App) secondHand() {
 	t := time.NewTicker(time.Second)
 	for range t.C {
 		mygo.RunOnMain(func() {
-			if a.win != nil && a.connected && a.status != nil {
+			if a.win != nil && (a.connected && a.status != nil || a.waking) {
 				a.win.Invalidate()
 			}
 		})
@@ -275,6 +282,7 @@ func (a *App) pollStatus(url string) {
 func (a *App) applyStatus(st *Status) {
 	a.status, a.connected, a.failures = st, true, 0
 	a.statusAt = a.now()
+	a.wakeErr = ""
 	push := func(i int, used, total float64) {
 		if total <= 0 {
 			return
@@ -555,9 +563,9 @@ func (a *App) discover(manual bool) {
 				a.setServerURL(u, false)
 				a.logf("已从云端实例找回服务地址")
 			case manual && a.acct.Active == 0:
-				a.flash("账号下没有运行中的实例，去「连接与账号」唤醒一台")
+				a.flash("账号下没有运行中的实例，点顶栏的「唤醒」申请一台")
 			case manual:
-				a.flash("实例在运行，但 Colab-yoga 服务端没在跑：点「唤醒实例并部署」会复用这台机器")
+				a.flash("实例在运行，但 Colab-yoga 服务端没在跑：点顶栏的「重新部署」会复用这台机器")
 			}
 		})
 	})
@@ -612,7 +620,7 @@ func (a *App) switchTo(id string) {
 	if url == "" || !a.connected || a.switching != "" {
 		return
 	}
-	a.switching = id
+	a.switching, a.switchAt = id, a.now()
 	a.flash("正在切换到 " + a.modelName(id) + "，下载并装载要几分钟")
 	ctx := a.ctxK * 1024
 	hf := a.hfToken
@@ -708,6 +716,8 @@ func (a *App) wake() {
 		return
 	}
 	a.waking = true
+	a.wakeAt, a.wakeStage, a.wakeLine, a.wakeErr = a.now(), 0, "", ""
+	a.redeploying = a.acct.Active > 0
 	gpu := a.gpu
 	a.logf("开始唤醒 Colab %s 实例并部署服务端…", gpu)
 	a.once("wake", func() {
@@ -719,23 +729,45 @@ func (a *App) wake() {
 				switch {
 				case strings.HasPrefix(line, "WAKE_URL:"):
 					a.setServerURL(strings.TrimSpace(strings.TrimPrefix(line, "WAKE_URL:")), false)
+					a.wakeStage, a.wakeLine = len(wakeStages)-1, "云端服务已就绪"
 					a.logf("云端服务已就绪")
 				case strings.HasPrefix(line, "WAKE_ERROR:"):
 					reported = true
-					a.notify("唤醒失败", strings.TrimSpace(strings.TrimPrefix(line, "WAKE_ERROR:")))
+					a.wakeErr = strings.TrimSpace(strings.TrimPrefix(line, "WAKE_ERROR:"))
+					a.notify("唤醒失败", a.wakeErr)
 				default:
 					a.logf("%s", strings.TrimSpace(strings.TrimPrefix(line, "WAKE_LOG:")))
+					// The card shows the wake's own progress lines. Whatever else the process
+					// prints (warnings, a traceback) is for the log alone.
+					if shown := cleanWakeLine(line); strings.HasPrefix(line, "WAKE_LOG:") || wakeStageOf(shown) >= 0 {
+						a.noteWake(shown)
+					}
 				}
 			})
 		}, "wake", "--gpu", gpu)
+		// Connect before the wake is called done, so the window goes from the wake's last
+		// stage to the connected server without showing "no instance" in between.
+		var url string
+		read := make(chan struct{})
+		a.apply(func() { url = a.serverURL; close(read) })
+		<-read
+		if err == nil && url != "" {
+			a.pollStatus(url)
+		}
 		a.apply(func() {
 			a.waking = false
 			if err != nil && !reported {
-				a.notify("唤醒失败", err.Error())
+				a.wakeErr = err.Error()
+				a.notify("唤醒失败", a.wakeErr)
 			}
 		})
 		a.refreshAccount()
 	})
+}
+
+func (a *App) setGPU(g string) {
+	a.gpu = g
+	_ = a.set.Set(map[string]any{"wakeGPUChoiceV2": g})
 }
 
 func (a *App) setTheme(name string) {

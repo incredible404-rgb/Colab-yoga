@@ -12,12 +12,17 @@ import (
 
 func (a *App) dashboard(c *ui.Context, p Palette) {
 	pageHeader(c, p, "仪表盘", a.dashboardSubtitle())
-	// Two cards side by side, wrapping under each other when the window is narrow.
+	// Two cards side by side, wrapping under each other when the window is narrow. The
+	// model card comes first: a wake and a model load show their progress in it, and in a
+	// small window the second card is below the fold.
 	ui.Row(c).Wrap().Gap(20).AlignItems(ui.Stretch).Children(func() {
-		a.billCard(c, p).Basis(420).Grow(1).Shrink(1).MinWidth(340)
 		a.modelCard(c, p).Basis(420).Grow(1).Shrink(1).MinWidth(340)
+		a.billCard(c, p).Basis(420).Grow(1).Shrink(1).MinWidth(340)
 	})
-	a.hardwareCard(c, p)
+	// Charts of nothing say nothing: the hardware card shows once a server reports.
+	if a.connected && a.status != nil {
+		a.hardwareCard(c, p)
+	}
 	a.accessCard(c, p)
 }
 
@@ -27,9 +32,9 @@ func (a *App) dashboardSubtitle() string {
 		now := a.now()
 		up := a.uptimeAt(now)
 		since := now.Add(-time.Duration(up * float64(time.Second))).Format("15:04")
-		return fmt.Sprintf("这台 GPU %s 分配给你，已运行 %s。对话在网页、Magpie 或 MCP 里进行，这里管算力和模型。", since, hms(up))
+		return fmt.Sprintf("这台 GPU %s 分配给你，已运行 %s。", since, hms(up))
 	}
-	return "对话在网页、Magpie 或 MCP 里进行，这里管算力和模型。"
+	return ""
 }
 
 // ─── Bill ─────────────────────────────────────────────────────────────────────
@@ -123,7 +128,7 @@ func (a *App) billCard(c *ui.Context, p Palette) ui.Element {
 	led := a.ledger
 	live := a.ledgerLive(now)
 	billing := a.connected || a.acct.Active > 0
-	return card(c, p, 1, "算力账单", "余额与扣费以 Colab 官方账本的实际扣减为准", func() {
+	return card(c, p, 2, "算力账单", "余额与扣费以 Colab 官方账本的实际扣减为准", func() {
 		if billing && burn > 0 {
 			pill(c, "计费中", p.Accent)
 		} else {
@@ -211,8 +216,7 @@ func (a *App) idleBlock(c *ui.Context, p Palette) {
 				rem := int(a.idleRemainingAt(a.now()))
 				text = fmt.Sprintf("闲置 %d 分 %02d 秒后自动释放（网页 / Magpie / MCP 的对话都算在用）", rem/60, rem%60)
 			}
-			ui.Text(c, text).FontSize(13).TextColor(p.Text2).Grow(1).Shrink(1).ContentTransition(numericDown)
-			outlineButton(c.Key("touch-bill"), p, "续时").Padding(4, 12).Disabled(!a.connected).OnClick(a.touch)
+			ui.Text(c, text).FontSize(13).FontFeatures("tnum").TextColor(p.Text2).Grow(1).Shrink(1).ContentTransition(numericDown)
 		})
 		frac := 0.0
 		if st != nil && a.connected && st.IdleTimeoutMin > 0 {
@@ -231,21 +235,26 @@ func (a *App) idleBlock(c *ui.Context, p Palette) {
 func (a *App) modelCard(c *ui.Context, p Palette) ui.Element {
 	id, alias, online := a.servedModel()
 	st := a.status
-	loading := a.switching != "" || (st != nil && a.connected && (st.IsLoading || st.IsDownloading))
+	loading := a.loadingModel()
+	failed := a.wakeErr != "" && !a.waking && !a.connected
 	busy := 0
 	if st != nil && st.LLM != nil && a.connected {
 		busy = st.LLM.SlotsBusy
 	} else {
 		busy = a.access.Llama.SlotsBusy
 	}
-	return card(c, p, 2, "当前模型", "云端 :8081 正在为网页、Magpie 和 MCP 服务的模型", func() {
+	return card(c, p, 1, "当前模型", "云端 :8081 正在为网页、Magpie 和 MCP 服务的模型", func() {
 		switch {
+		case a.waking:
+			pill(c, "唤醒中", p.Warning)
 		case loading:
 			pill(c, "加载中", p.Warning)
 		case online && busy > 0:
 			pill(c, "推理中", p.Info)
 		case online:
 			pill(c, "运行中", p.Success)
+		case failed:
+			pill(c, "唤醒失败", p.Danger)
 		case a.connected:
 			pill(c, "未加载", p.Muted)
 		default:
@@ -253,24 +262,80 @@ func (a *App) modelCard(c *ui.Context, p Palette) ui.Element {
 		}
 	}, func() {
 		m := a.modelByID(id)
-		// One headline that morphs letter by letter as the model changes (Magic Move).
-		head, size, col := "云端还没有模型在跑", float32(22), p.Text2
+		// One headline that morphs letter by letter as the state changes (Magic Move). Under
+		// it is what that state needs: a line pointing at the next step in the top bar, the
+		// stages of the job in flight, or the model being served.
+		head, size, col := "还没有实例", float32(22), p.Text2
+		hint, timer := "点顶栏的「唤醒 "+a.gpu+"」申请一台，几分钟后在这里加载模型。", ""
 		switch {
-		case online && m != nil:
-			head, size, col = m.Name, 26, p.Text
-		case online:
-			head, col = alias, p.Text
+		case a.waking:
+			head, col, hint, timer = a.wakeTitle(), p.Text, "", a.wakeElapsed()
 		case loading:
-			head, col = "正在装载 "+a.modelName(a.switching), p.Text
+			head, col, hint = "正在装载模型", p.Text, "" // a load some other client began names no model
+			if a.switching != "" {
+				head = "正在装载 " + a.modelName(a.switching)
+			}
+			if a.switching != "" && !a.switchAt.IsZero() {
+				timer = mmss(a.now().Sub(a.switchAt).Seconds())
+			}
+		case online && m != nil:
+			head, size, col, hint = m.Name, 26, p.Text, ""
+		case online:
+			head, col, hint = alias, p.Text, ""
+		case failed:
+			head, col, hint = "唤醒失败", p.Text, ""
+		case a.connected:
+			head, hint = "实例已就绪，还没有模型", "点顶栏的「加载模型 ▾」选一个，下载并装载要几分钟。"
+		case a.acct.Active > 0:
+			head, hint = "实例在计费，服务端没连上", "正在自动找回服务地址；找不回就点顶栏的「重新部署」，会复用这台机器。"
 		}
-		h := ui.Text(c.Key("headline"), head).Font(fontSerif).FontSize(size).SingleLine().ContentTransition(morph)
-		h.TextColor(h.AnimateColor("c", col, fadeColor))
-		if alias != "" {
-			ui.Text(c.Key("alias"), alias).Font(fontMono).FontSize(12).TextColor(p.Text3).SingleLine().
+		// A model's name morphs into the next model's. A state's line only crossfades, which
+		// is over well within the second a finished job has to come to rest.
+		key, change := "headline", crossfade
+		if online && !a.waking && !loading {
+			key, change = "model-name", morph
+		}
+		ui.Row(c.Key("head")).Gap(12).AlignItems(ui.End).Children(func() {
+			h := ui.Text(c.Key(key), head).Font(fontSerif).FontSize(size).SingleLine().Grow(1).Shrink(1).MinWidth(60).
+				Tooltip(head).ContentTransition(change)
+			h.TextColor(h.AnimateColor("c", col, fadeColor))
+			if timer != "" {
+				ui.Text(c.Key("timer"), timer).Font(fontMono).FontFeatures("tnum").FontSize(13).TextColor(p.Text3).NoWrap().
+					ContentTransition(numeric)
+			}
+		})
+		if hint != "" {
+			ui.Text(c.Key("hint"), hint).FontSize(13).TextColor(p.Text3).Pretty().ContentTransition(crossfade).Transition(rowMotion)
+		}
+		switch {
+		case a.waking:
+			stageTrack(c, p, "wake-track", wakeStages, a.wakeStage, false)
+			line := a.wakeLine
+			if line == "" {
+				line = "正在启动唤醒脚本…"
+			}
+			ui.Text(c.Key("wake-line"), line).FontSize(13).TextColor(p.Text2).SingleLine().Tooltip(line).
+				ContentTransition(crossfade).Transition(liveMotion)
+		case failed:
+			stageTrack(c, p, "wake-track", wakeStages, a.wakeStage, true)
+			ui.Text(c.Key("wake-line"), a.wakeErr).FontSize(13).TextColor(p.Danger).Pretty().ContentTransition(crossfade).Transition(liveMotion)
+			ui.Row(c.Key("wake-failed")).Gap(8).Transition(liveMotion).Children(func() {
+				outlineButton(c.Key("see-logs"), p, "查看日志").Padding(4, 12).OnClick(func() { a.logsOpen, a.logsAlert = true, false })
+				ghostButton(c.Key("dismiss"), p, "知道了").Padding(4, 12).OnClick(func() { a.wakeErr = "" })
+			})
+		case loading:
+			stage := 0
+			if st != nil && a.connected && st.IsLoading && !st.IsDownloading {
+				stage = 1
+			}
+			stageTrack(c, p, "load-track", loadStages, stage, false)
+		}
+		if alias != "" && !loading {
+			ui.Text(c.Key("alias"), alias).Font(fontMono).FontSize(12).TextColor(p.Text3).SingleLine().Tooltip(alias).
 				ContentTransition(morph).Transition(rowMotion)
 		}
-		if m != nil {
-			ui.Row(c.Key("chips-"+m.ID)).Wrap().Gap(6).Transition(rowMotion).Children(func() {
+		if m != nil && !loading {
+			ui.Row(c.Key("chips-" + m.ID)).Wrap().Gap(6).Transition(rowMotion).Children(func() {
 				for _, tag := range m.Tags {
 					chip(c, p, tag)
 				}
@@ -283,13 +348,14 @@ func (a *App) modelCard(c *ui.Context, p Palette) ui.Element {
 			})
 		}
 		if loading && st != nil {
-			ui.Column(c.Key("load")).Gap(6).Transition(rowMotion).Children(func() {
+			ui.Column(c.Key("load")).Gap(6).Transition(liveMotion).Children(func() {
 				prog := clamp01(st.TaskProgress)
 				if prog <= 0 {
 					prog = -1 // nothing to measure yet: sweep instead of sitting at zero
 				}
 				gauge(c, p, "load", prog, p.Accent, "装载进度")
-				ui.Text(c, st.TaskMessage).FontSize(12).TextColor(p.Text3).SingleLine().ContentTransition(numeric)
+				ui.Text(c, st.TaskMessage).FontSize(12).FontFeatures("tnum").TextColor(p.Text3).SingleLine().Tooltip(st.TaskMessage).
+					ContentTransition(numeric)
 			})
 		}
 		if st != nil && a.connected && st.VRAMTotal > 0 {
@@ -302,38 +368,48 @@ func (a *App) modelCard(c *ui.Context, p Palette) ui.Element {
 				gauge(c, p, "vram", st.VRAMUsed/st.VRAMTotal, p.ChartRAM, "显存占用")
 			})
 		}
-		ui.Row(c).Wrap().GapX(32).GapY(12).Children(func() {
-			slots, last := "—", "—"
-			if st != nil && st.LLM != nil && st.LLM.Online && a.connected {
-				slots = fmt.Sprintf("%d / %d 忙", st.LLM.SlotsBusy, st.LLM.SlotsTotal)
-				last = ago(st.LLM.LastActiveAge)
-			} else if a.access.Llama.OK {
-				slots = fmt.Sprintf("%d / %d 忙", a.access.Llama.SlotsBusy, a.access.Llama.SlotsTotal)
-			}
-			metricRoll(c, p, "推理槽位", slots, "", 16, p.Text, numeric)
-			metric(c, p, "最近一次推理", last, "", 16, p.Text)
-			mcpText, mcpCol := a.mcpSummary(p)
-			metric(c, p, "小说 MCP", mcpText, "", 16, mcpCol)
-		})
-		ui.Row(c).Gap(8).Wrap().Children(func() {
-			label := "切换模型"
-			if !online {
-				label = "加载模型"
-			}
-			ui.Button(c, label+" ▾").Padding(7, 16).Radius(8).Background(p.Ink).TextColor(p.InkText).
-				FontSize(13).FontWeight(600).Disabled(!a.connected || loading || len(a.catalog) == 0).Menu(func(menu *ui.Menu) {
-				for i := range a.catalog {
-					mm := &a.catalog[i]
-					item := menu.Item(modelLabel(mm)).Checked(online && mm.ID == id)
-					if item.Chosen() && mm.ID != id {
-						a.switchTarget, a.askSwitch = mm.ID, true
-					}
+		// With no server and no model answering there is nothing to count: no row of dashes.
+		if st != nil && a.connected || a.access.Llama.OK {
+			ui.Row(c.Key("metrics")).Wrap().GapX(32).GapY(12).Transition(rowMotion).Children(func() {
+				slots, last := "—", "—"
+				if st != nil && st.LLM != nil && st.LLM.Online && a.connected {
+					slots = fmt.Sprintf("%d / %d 忙", st.LLM.SlotsBusy, st.LLM.SlotsTotal)
+					last = ago(st.LLM.LastActiveAge)
+				} else if a.access.Llama.OK {
+					slots = fmt.Sprintf("%d / %d 忙", a.access.Llama.SlotsBusy, a.access.Llama.SlotsTotal)
 				}
+				metricRoll(c, p, "推理槽位", slots, "", 16, p.Text, numeric)
+				metric(c, p, "最近一次推理", last, "", 16, p.Text)
+				mcpText, mcpCol := a.mcpSummary(p)
+				metric(c, p, "小说 MCP", mcpText, "", 16, mcpCol)
 			})
-			outlineButton(c.Key("web-model"), p, "打开网页对话").Disabled(!online).OnClick(a.openWeb)
-			dangerButton(c.Key("unload"), p, "卸载").Disabled(!online || !a.connected || loading).
-				OnClick(func() { a.askUnload = true })
-		})
+		}
+		// Loading the first model and opening the chat are steps of the top bar; what is
+		// left here is what is done to a model that runs.
+		if online && !loading {
+			ui.Row(c.Key("actions")).Gap(8).Wrap().Transition(rowMotion).Children(func() {
+				off := ""
+				switch {
+				case !a.connected:
+					off = "云端服务端没连上"
+				case len(a.catalog) == 0:
+					off = "模型库是空的"
+				}
+				change := outlineButton(c.Key("switch-menu"), p, "切换模型 ▾")
+				if off == "" {
+					change.Menu(a.modelMenu(id, online))
+				} else {
+					act(change, p, off, nil)
+				}
+				off = ""
+				if !a.connected {
+					off = "云端服务端没连上"
+				}
+				unload := act(dangerButton(c.Key("unload"), p, "卸载"), p, off, func() { a.askUnload = true })
+				confirmHere(c, p, unload, &a.askUnload, "卸载 "+a.modelName(id)+"？",
+					"释放显存，网页对话会断开；GPU 仍在计费，不用了请点「释放」。", "确认卸载", true, func() { a.unload(id) })
+			})
+		}
 	})
 }
 
@@ -344,8 +420,17 @@ func (a *App) ctxTokens() int {
 	return a.access.Llama.NCtx
 }
 
+// noRuntime: nothing runs that a way in could reach. What is down then is not a fault to
+// show in red, only what a wake will bring up.
+func (a *App) noRuntime() bool {
+	return !a.connected && !a.waking && a.acct.Active == 0 && !a.access.Llama.OK
+}
+
 func (a *App) mcpSummary(p Palette) (string, ui.Color) {
 	if !a.access.MCPUp && !a.access.At.IsZero() {
+		if a.noRuntime() {
+			return "—", p.Text3
+		}
 		return "本机服务没开", p.Danger
 	}
 	if st := a.status; st != nil && st.LLM != nil && st.LLM.MCP != nil && a.connected {
@@ -454,14 +539,13 @@ const sparkSlide = 900 * time.Millisecond
 
 type wayIn struct {
 	title, value, note string
-	state             string // ok | warn | down | idle
-	actions           []action
+	state              string // ok | warn | down | idle
+	actions            []action
 }
 
 type action struct {
-	label   string
-	primary bool
-	run     func()
+	label string
+	run   func()
 }
 
 func (a *App) accessCard(c *ui.Context, p Palette) {
@@ -487,18 +571,21 @@ func (a *App) waysIn() []wayIn {
 	down := fmt.Sprintf("不通（%s）：云端没有模型在跑，或这台电脑没连上 Tailscale。", acc.Llama.Err)
 	_, alias, _ := a.servedModel()
 
-	web := wayIn{title: "网页对话", value: ts, actions: []action{{"打开", true, a.openWeb}, {"复制", false, func() { a.copy(ts, "已复制网页地址") }}}}
+	web := wayIn{title: "网页对话", value: ts, actions: []action{{"打开", a.openWeb}, {"复制", func() { a.copy(ts, "已复制网页地址") }}}}
 	apiW := wayIn{title: "OpenAI 兼容 API", value: api, actions: []action{
-		{"复制地址", false, func() { a.copy(api, "已复制 API 地址") }},
-		{"复制模型名", false, func() { a.copy(alias, "已复制模型名") }},
+		{"复制地址", func() { a.copy(api, "已复制 API 地址") }},
+		{"复制模型名", func() { a.copy(alias, "已复制模型名") }},
 	}}
 	switch {
 	case ts == "":
-		web.state, web.note = "idle", "没配置 Tailscale 地址，去「连接与账号」填写。"
+		web.state, web.note = "idle", "没配置 Tailscale 地址，去「连接」页填写。"
 		apiW.state, apiW.note = web.state, web.note
 	case checking:
 		web.state, web.note = "idle", "检测中…"
 		apiW.state, apiW.note = "idle", "检测中…"
+	case a.noRuntime():
+		web.state, web.note = "idle", "没有实例。唤醒并加载模型后可用。"
+		apiW.state, apiW.note = web.state, web.note
 	case acc.Llama.OK:
 		web.state, web.note = "ok", "浏览器直接打开 llama-server 网页界面；只在 tailnet 内可见，免密钥。首次打开要下载约 3 MB 页面资源，之后走缓存。"
 		apiW.state, apiW.note = "ok", "模型名 "+alias+"；tailnet 内无需 API Key。"
@@ -512,7 +599,7 @@ func (a *App) waysIn() []wayIn {
 	if mg.ProviderID != "" && alias != "" {
 		model = mg.ProviderID + "/" + alias
 	}
-	mag := wayIn{title: "Magpie", value: model, actions: []action{{"复制模型名", false, func() { a.copy(model, "已复制 Magpie 模型名") }}}}
+	mag := wayIn{title: "Magpie", value: model, actions: []action{{"复制模型名", func() { a.copy(model, "已复制 Magpie 模型名") }}}}
 	switch {
 	case checking:
 		mag.state, mag.note = "idle", "检测中…"
@@ -520,6 +607,8 @@ func (a *App) waysIn() []wayIn {
 		mag.state, mag.note = "warn", "Magpie 里没有指向这个 Tailscale 地址的供应商。"
 	case mg.Off:
 		mag.state, mag.note = "warn", fmt.Sprintf("「%s」供应商在 Magpie 里是关闭的，各 agent 选不到 %s/*；在 Magpie 里打开即可。", mg.ProviderName, mg.ProviderID)
+	case a.noRuntime():
+		mag.state, mag.note = "idle", "没有实例。唤醒并加载模型后各 agent 可选。"
 	case mg.GatewayUp == nil:
 		mag.state, mag.note = "idle", "没找到 magpie 命令，无法确认网关。"
 	case !*mg.GatewayUp:
@@ -533,10 +622,12 @@ func (a *App) waysIn() []wayIn {
 	}
 
 	mcpText, _ := a.mcpSummary(darkPalette)
-	mcp := wayIn{title: "MCP 小说桥", value: a.novelRoot, actions: []action{{"打开文件夹", false, func() { a.openFolder(a.novelRoot) }}}}
+	mcp := wayIn{title: "MCP 小说桥", value: a.novelRoot, actions: []action{{"打开文件夹", func() { a.openFolder(a.novelRoot) }}}}
 	switch {
 	case checking:
 		mcp.state, mcp.note = "idle", "检测中…"
+	case !acc.MCPUp && a.noRuntime():
+		mcp.state, mcp.note = "idle", "本机 MCP 服务（local_novel_mcp.py）没在运行；要用小说目录工具时再启动。"
 	case !acc.MCPUp:
 		mcp.state, mcp.note = "down", "本机 MCP 服务（local_novel_mcp.py）没在运行，网页里的小说目录工具会报错。"
 	case mcpText == "已连通":
@@ -557,21 +648,20 @@ func (a *App) wayRow(c *ui.Context, p Palette, w wayIn) {
 	row.Children(func() {
 		ui.Row(c).Gap(10).Children(func() {
 			dot(c, col, 8)
-			ui.Text(c, w.title).FontSize(14).FontWeight(650).NoWrap()
+			title := ui.Text(c, w.title).FontSize(14).FontWeight(650).NoWrap()
+			if w.state == "ok" {
+				title.Tooltip(w.note)
+			}
 			ui.Text(c, w.value).Font(fontMono).FontSize(12).TextColor(p.Text3).SingleLine().
 				Grow(1).Shrink(1).MinWidth(40).Tooltip(w.value)
 			for _, act := range w.actions {
-				act := act
-				var b ui.Element
-				if act.primary {
-					b = inkButton(c.Key(w.title+act.label), p, act.label)
-				} else {
-					b = outlineButton(c.Key(w.title+act.label), p, act.label)
-				}
-				b.Padding(4, 12).FontSize(12).OnClick(act.run)
+				outlineButton(c.Key(w.title+act.label), p, act.label).Padding(4, 12).FontSize(12).OnClick(act.run)
 			}
 		})
-		ui.Text(c, w.note).FontSize(12).TextColor(p.Text3).ContentTransition(crossfade)
+		// A way in that works needs no sentence: its note waits under the pointer.
+		if w.state != "ok" {
+			ui.Text(c.Key("note"), w.note).FontSize(12).TextColor(p.Text3).Pretty().ContentTransition(crossfade).Transition(rowMotion)
+		}
 	})
 }
 

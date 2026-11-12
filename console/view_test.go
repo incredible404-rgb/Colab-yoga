@@ -62,10 +62,10 @@ func TestDashboardShowsWhatMatters(t *testing.T) {
 }
 
 func TestControlsFitTheWindow(t *testing.T) {
-	for _, size := range [][2]int{{1440, 900}, {1000, 660}, {1920, 1080}} {
+	for _, size := range [][2]int{{1440, 900}, {1000, 660}, {1024, 640}, {1920, 1080}} {
 		a := fakeApp(t)
 		tt := ui.NewTesterWith(a.view, size[0], size[1], ui.TesterOptions{Dark: true})
-		for _, label := range []string{"打开网页对话", "续时", "释放", "日志", "切换模型 ▾", "卸载", "仪表盘", "连接与账号"} {
+		for _, label := range []string{"打开网页对话", "续时", "释放", "日志", "切换模型 ▾", "卸载", "仪表盘", "连接", "账号", "切换到浅色"} {
 			r, ok := tt.Find(label)
 			if ok && r.W == 0 && r.Y >= float32(size[1]) {
 				continue // below the fold: the page scrolls vertically, never sideways
@@ -83,11 +83,18 @@ func TestSwitchAsksFirst(t *testing.T) {
 	if err := tt.Click("切换到 Qwen3.8-Flash-Next (Huihui v2)"); err != nil {
 		t.Fatal(err)
 	}
-	if !a.askSwitch || a.switchTarget != "qwen38-huihui-v2" || a.switching != "" {
-		t.Fatalf("switch must ask before loading: ask=%v target=%q switching=%q", a.askSwitch, a.switchTarget, a.switching)
+	// A model's row asks right under its button; nothing loads until that is answered.
+	if a.switching != "" || !hasTextPart(tt, "确认切换") {
+		t.Fatalf("switch must ask before loading: switching=%q texts %q", a.switching, tt.Texts())
 	}
 	if !hasTextPart(tt, "会先停掉它") {
 		t.Errorf("confirmation should warn that :8081 is replaced; texts %q", tt.Texts())
+	}
+	if err := tt.Click("确认切换"); err != nil {
+		t.Fatal(err)
+	}
+	if a.switching != "qwen38-huihui-v2" {
+		t.Errorf("confirming must start the load: switching=%q", a.switching)
 	}
 }
 
@@ -198,10 +205,11 @@ func TestNoStudioOrMultimodalLeft(t *testing.T) {
 func TestBindingShowsCodeInputAndCancels(t *testing.T) {
 	a := fakeApp(t)
 	a.acct.LoggedIn = false
-	a.page = "connection"
+	a.connected, a.status, a.acct.Active = false, nil, 0
 	tt := ui.NewTesterWith(a.view, 1440, 900, ui.TesterOptions{Dark: true})
-	if !hasTextPart(tt, "绑定 Google 账号") {
-		t.Fatalf("no bind button; texts %q", tt.Texts())
+	// With no account bound the window is the sign-in page alone: no rail, no top-bar actions.
+	if !hasTextPart(tt, "用 Google 账号登录") || hasTextPart(tt, "仪表盘") || hasTextPart(tt, "释放") {
+		t.Fatalf("no sign-in page; texts %q", tt.Texts())
 	}
 	// The bridge step (auth_url) runs in the background; with it done, the code input shows.
 	a.binding = true
@@ -220,13 +228,17 @@ func TestBindingShowsCodeInputAndCancels(t *testing.T) {
 
 func TestLogoutAsksFirst(t *testing.T) {
 	a := fakeApp(t)
-	a.page = "connection"
 	tt := ui.NewTesterWith(a.view, 1440, 900, ui.TesterOptions{Dark: true})
-	if err := tt.Click("退出账号"); err != nil {
+	// The account sits at the foot of the rail; signing out is in its menu and asks there.
+	if err := tt.Click("账号"); err != nil {
 		t.Fatal(err)
 	}
-	if !a.askLogout {
-		t.Fatal("logout must ask first")
+	if err := tt.ChooseMenuItem("退出账号"); err != nil {
+		t.Fatalf("%v; menu %q", err, tt.Menu())
+	}
+	tt.Frame()
+	if !a.askLogout || !hasTextPart(tt, "确认退出") {
+		t.Fatalf("logout must ask first: ask=%v texts %q", a.askLogout, tt.Texts())
 	}
 }
 
@@ -283,7 +295,7 @@ func TestOfflineAndRegion(t *testing.T) {
 	a.connected, a.status, a.acct.Active, a.acct.Burn = false, nil, 0, 0
 	a.access = Access{At: time.Now(), Llama: LlamaProbe{Err: "超时"}}
 	tt := ui.NewTesterWith(a.view, 1440, 900, ui.TesterOptions{Dark: true})
-	for _, want := range []string{"没有运行中的实例，不在计费", "未计费", "云端还没有模型在跑"} {
+	for _, want := range []string{"没有实例 · 不计费", "未计费", "还没有实例", "唤醒 G4"} {
 		if !hasTextPart(tt, want) {
 			t.Errorf("offline view lacks %q; texts %q", want, tt.Texts())
 		}
@@ -344,6 +356,26 @@ func TestSnapshots(t *testing.T) {
 			a.access = Access{At: time.Now(), Llama: LlamaProbe{Err: "超时"}, MCPUp: true}
 			a.keeper = Keeper{}
 		}},
+		// The session's states at the size the window is often left at.
+		{"state1_idle_dark_1024", 1024, 640, stateIdle},
+		{"state1_idle_light_1024", 1024, 640, func(a *App) { stateIdle(a); a.themeName = "light" }},
+		{"state2_waking_dark_1024", 1024, 640, stateWaking},
+		{"state2_waking_light_1024", 1024, 640, func(a *App) { stateWaking(a); a.themeName = "light" }},
+		{"state2_wake_failed_dark_1024", 1024, 640, stateWakeFailed},
+		{"state3_lost_dark_1024", 1024, 640, stateLost},
+		{"state4_nomodel_dark_1024", 1024, 640, stateNoModel},
+		{"state5_loading_dark_1024", 1024, 640, stateLoading},
+		{"state6_online_dark_1024", 1024, 640, nil},
+		{"state6_online_light_1024", 1024, 640, func(a *App) { a.themeName = "light" }},
+		{"state7_keep_warning_dark_1024", 1024, 640, stateKeepWarning},
+		{"state1_idle_dark_1440", 1440, 900, stateIdle},
+		{"state2_waking_dark_1440", 1440, 900, stateWaking},
+		{"signin_dark_1024", 1024, 640, func(a *App) { stateIdle(a); a.acct.LoggedIn = false }},
+		{"signin_light_1024", 1024, 640, func(a *App) { stateIdle(a); a.acct.LoggedIn = false; a.themeName = "light" }},
+		{"signin_code_dark_1024", 1024, 640, func(a *App) { stateIdle(a); a.acct.LoggedIn = false; a.binding = true }},
+		{"connection_dark_1024", 1024, 640, func(a *App) { a.page = "connection" }},
+		{"confirm_unload_dark_1024", 1024, 900, func(a *App) { a.askUnload = true }},
+		{"confirm_logout_dark_1024", 1024, 640, func(a *App) { a.askLogout = true }},
 	}
 	for _, s := range shots {
 		a := fakeApp(t)
@@ -405,7 +437,9 @@ func TestIdleWindowIsStill(t *testing.T) {
 	}
 	a.waking = false
 	tt.Frame()
-	tt.Advance(time.Second)
+	// The wake's stages fold away and the card's rows glide back into place on the page's
+	// own spring, which takes a little over a second to come to rest.
+	tt.Advance(2 * time.Second)
 	if tt.FramePending() {
 		t.Error("the pulse must stop once the job is done")
 	}
@@ -418,14 +452,14 @@ func TestMotionKeepsControlsUsable(t *testing.T) {
 	a := fakeApp(t)
 	tt := ui.NewTesterWith(a.view, 1440, 900, ui.TesterOptions{Dark: true})
 	tt.Advance(2 * time.Second)
-	if err := tt.Click("连接与账号"); err != nil {
+	if err := tt.Click("连接"); err != nil {
 		t.Fatal(err)
 	}
 	tt.Advance(80 * time.Millisecond)
 	if a.page != "connection" || !hasTextPart(tt, "云端实例") {
 		t.Fatalf("page did not switch: %q", a.page)
 	}
-	if err := tt.Click("浅色"); err != nil {
+	if err := tt.Click("切换到浅色"); err != nil {
 		t.Fatal(err)
 	}
 	if err := tt.Click("日志"); err != nil {
@@ -471,13 +505,13 @@ func TestMotionSnapshots(t *testing.T) {
 	tt.Advance(160 * time.Millisecond)
 	save(tt, "mid_arrive_160ms")
 	tt.Advance(3 * time.Second)
-	_ = tt.Click("连接与账号")
+	_ = tt.Click("连接")
 	tt.Advance(90 * time.Millisecond)
 	save(tt, "mid_pageswitch_90ms")
 	tt.Advance(220 * time.Millisecond)
 	save(tt, "mid_pageswitch_310ms")
 	tt.Advance(2 * time.Second)
-	_ = tt.Click("浅色")
+	_ = tt.Click("切换到浅色")
 	tt.Advance(170 * time.Millisecond)
 	save(tt, "mid_theme_170ms")
 	tt.Advance(2 * time.Second)

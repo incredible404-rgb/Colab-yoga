@@ -8,8 +8,9 @@ import (
 	"github.com/egoist/mygo/ui"
 )
 
-// view is the whole window: a top bar that never scrolls (status, money, the three
-// actions used most), a left rail (pages + model library), the page, and a log drawer.
+// view is the whole window: a top bar that never scrolls (status, money, and the step
+// that comes next), a left rail (pages, model library, account), the page, and a log
+// drawer. Until a Google account is bound it is the sign-in page alone.
 func (a *App) view(c *ui.Context) {
 	root := ui.Column(c).Fill()
 	// Switching themes crossfades every color of the palette rather than flashing.
@@ -26,10 +27,18 @@ func (a *App) view(c *ui.Context) {
 	applyTheme(c, p)
 	a.dialogs(c)
 	if a.toast != "" {
-		c.Toast(a.toast)
-		a.toast = ""
+		if a.toastUndo != nil {
+			c.ToastAction(a.toast, "撤销", a.toastUndo)
+		} else {
+			c.Toast(a.toast)
+		}
+		a.toast, a.toastUndo = "", nil
 	}
 	root.Background(p.Bg).Children(func() {
+		if a.signingIn() {
+			a.signInPage(c, p)
+			return
+		}
 		a.topBar(c, p)
 		body := ui.Row(c).Grow(1).AlignItems(ui.Stretch)
 		// The drawer's width rides a spring and the split beside it takes the rest, so the
@@ -48,36 +57,58 @@ func (a *App) view(c *ui.Context) {
 	})
 }
 
+// loadingModel reports a model being downloaded or loaded on :8081.
+func (a *App) loadingModel() bool {
+	st := a.status
+	return a.switching != "" || (st != nil && a.connected && (st.IsLoading || st.IsDownloading))
+}
+
 // busy reports a job in flight, the only time the status lights pulse.
 func (a *App) busy() bool {
 	st := a.status
-	loading := st != nil && a.connected && (st.IsLoading || st.IsDownloading)
 	inferring := st != nil && a.connected && st.LLM != nil && st.LLM.SlotsBusy > 0
 	recovering := !a.connected && a.acct.Active > 0
-	return a.waking || a.releasing || a.discovering || a.switching != "" || loading || inferring || recovering
+	return a.waking || a.releasing || a.discovering || a.loadingModel() || inferring || recovering
 }
 
 // ─── Top bar ──────────────────────────────────────────────────────────────────
 
+// The buttons follow a session from left to right: wake, load a model and chat, keep
+// alive, release. At any time the one filled button is the step that comes next; what
+// cannot be used now is gray and says why under the pointer.
 func (a *App) topBar(c *ui.Context, p Palette) {
 	ui.Row(c).Height(60).PaddingX(22).Gap(14).Background(p.Panel).
 		BorderWidth(0, 0, 1, 0).BorderColor(p.Border).Children(func() {
 		ui.Text(c, "Colab-yoga").Font(fontSerif).FontSize(22).NoWrap()
 		ui.Box(c).Width(1).Height(22).Background(p.BorderStrong)
-		col, text := a.runtimeLine(p)
+		col, text, tip := a.runtimeLine(p)
 		statusDot(c, col, 9, a.busy())
-		ui.Text(c, text).SingleLine().Grow(1).Shrink(1).MinWidth(60).TextColor(p.Text2).Tooltip(text).
+		ui.Text(c, text).SingleLine().Grow(1).Shrink(1).MinWidth(60).TextColor(p.Text2).Tooltip(tip).
 			ContentTransition(morph)
+		if a.waking {
+			ui.Text(c.Key("wake-clock"), a.wakeElapsed()).Font(fontMono).FontFeatures("tnum").FontSize(13).NoWrap().
+				TextColor(p.Text3).ContentTransition(numeric)
+		}
 		if a.acct.Known && a.acct.LoggedIn {
 			rate, _, _ := a.burnRate(a.now())
-			money := ui.Text(c, fmt.Sprintf("余额 %s CU · %.2f CU/h", thousands(a.balance()), rate)).
-				Font(fontMono).FontFeatures("tnum").FontSize(13).NoWrap().ContentTransition(numericDown)
+			text := "余额 " + thousands(a.balance()) + " CU"
+			if rate > 0 {
+				text += fmt.Sprintf(" · %.2f CU/h", rate)
+			}
+			money := ui.Text(c, text).Font(fontMono).FontFeatures("tnum").FontSize(13).NoWrap().ContentTransition(numericDown)
 			money.TextColor(money.AnimateColor("c", map[bool]ui.Color{true: p.Accent, false: p.Text2}[a.acct.Burn > 0], fadeColor))
 		}
-		inkButton(c, p, "打开网页对话").Disabled(a.tsURL == "").OnClick(a.openWeb)
-		outlineButton(c, p, "续时").Disabled(!a.connected).Tooltip("重置闲置自动释放倒计时").OnClick(a.touch)
-		dangerButton(c, p, "释放").Disabled(a.releasing || (!a.connected && a.acct.Active == 0)).
-			OnClick(func() { a.askRelease = true })
+		a.wakeSlot(c, p)
+		a.chatSlot(c, p)
+		a.keepButton(c, p)
+		off := ""
+		switch {
+		case a.releasing:
+			off = "正在释放实例…"
+		case !a.connected && a.acct.Active == 0 && !a.waking:
+			off = "没有实例可释放"
+		}
+		act(dangerButton(c.Key("release"), p, "释放"), p, off, func() { a.askRelease = true })
 		logs := ghostButton(c, p, "日志").OnClick(func() {
 			a.logsOpen = !a.logsOpen
 			a.logsAlert = false
@@ -88,8 +119,9 @@ func (a *App) topBar(c *ui.Context, p Palette) {
 	})
 }
 
-// runtimeLine summarizes the runtime in one line for the top bar.
-func (a *App) runtimeLine(p Palette) (ui.Color, string) {
+// runtimeLine summarizes the runtime in one line for the top bar, with the longer text
+// its tooltip shows.
+func (a *App) runtimeLine(p Palette) (col ui.Color, text, tip string) {
 	region := ""
 	if code, name := regionOf(a.acct.Endpoint); code != "" {
 		region = " · " + strings.TrimSpace(name+" "+code)
@@ -100,19 +132,35 @@ func (a *App) runtimeLine(p Palette) (ui.Color, string) {
 	}
 	switch {
 	case a.releasing:
-		return p.Warning, "正在释放实例…"
+		text = "正在释放实例…"
+		return p.Warning, text, text
 	case a.waking:
-		return p.Warning, "正在唤醒并部署…"
+		text, tip = wakeDoing[min(max(a.wakeStage, 0), len(wakeDoing)-1)], a.wakeLine
+		if tip == "" {
+			tip = text
+		}
+		return p.Warning, text, tip
+	// The state comes first: in a narrow window the line is cut at its end, which then
+	// costs the region or the GPU's name rather than the word that matters.
 	case a.connected:
-		return p.Success, strings.TrimPrefix(gpu+region+" · 在线", " · ")
+		text = "在线" + sep(gpu) + region
+		return p.Success, text, text
 	case a.acct.Active > 0:
-		return p.Warning, strings.TrimPrefix(gpu+region+" · 实例在计费，正在找回服务地址", " · ")
+		text = "实例在计费，正在找回服务地址" + sep(gpu) + region
+		return p.Warning, text, text
 	case !a.acct.Known:
-		return p.Muted, "正在查询 Colab 账号…"
-	case !a.acct.LoggedIn:
-		return p.Muted, "未绑定 Google 账号"
+		text = "正在查询 Colab 账号…"
+		return p.Muted, text, text
 	}
-	return p.Muted, "没有运行中的实例，不在计费"
+	return p.Muted, "没有实例 · 不计费", "账号下没有运行中的 Colab 实例，不在计费"
+}
+
+// sep joins s to what stands before it in the status line.
+func sep(s string) string {
+	if s == "" {
+		return ""
+	}
+	return " · " + s
 }
 
 func shortGPU(name string) string {
@@ -121,12 +169,161 @@ func shortGPU(name string) string {
 	return name
 }
 
+// wakeOff says why a wake cannot start now, or "" when it can.
+func (a *App) wakeOff() string {
+	switch {
+	case a.releasing:
+		return "正在释放实例，完成后再唤醒"
+	case !a.acct.Known:
+		return "正在查询 Colab 账号…"
+	case !a.acct.LoggedIn:
+		return "先登录 Google 账号"
+	}
+	return ""
+}
+
+// slotMotion opens and closes a top-bar slot along the bar, so its neighbors glide
+// aside instead of jumping.
+var slotMotion = ui.ElementTransition{
+	Animation:    &springSize,
+	Enter:        &ui.Motion{Collapse: true},
+	Exit:         &ui.Motion{Collapse: true},
+	ExitDuration: 160 * time.Millisecond,
+	ExitEase:     ui.EaseOut,
+}
+
+// wakeSlot holds the first step of every session: a split button that wakes the
+// remembered GPU (its arrow picks another), the wake in flight, or a redeploy when a
+// runtime bills without its server. With a server connected there is nothing to wake
+// and the slot closes.
+func (a *App) wakeSlot(c *ui.Context, p Palette) {
+	if a.connected && !a.waking {
+		return
+	}
+	ui.Row(c.Key("wake-slot")).Gap(1).Transition(slotMotion).Children(func() {
+		off := a.wakeOff()
+		switch {
+		case a.waking:
+			label := "唤醒中…"
+			if a.redeploying {
+				label = "部署中…"
+			}
+			busyButton(c.Key("waking"), p, label)
+		case a.acct.Active > 0:
+			act(warnButton(c.Key("redeploy"), p, "重新部署").
+				Tooltip("实例在计费但服务端没连上：复用这台机器重启服务端，:8081 上的模型不受影响"), p, off, a.wake)
+		default:
+			// Filled only as the next step: a model already answering on the tailnet makes
+			// the chat the next step and this a plain button.
+			button := inkButton
+			if _, _, online := a.servedModel(); online {
+				button = outlineButton
+			}
+			act(button(c.Key("wake"), p, "唤醒 "+a.gpu).Radius(8, 0, 0, 8).Padding(7, 12, 7, 16), p, off, a.wake)
+			arrow := button(c.Key("wake-gpu"), p, "▾").Radius(0, 8, 8, 0).Padding(7, 9).Label("选择 GPU 型号")
+			if off != "" {
+				act(arrow, p, off, nil)
+				return
+			}
+			arrow.Tooltip("选择唤醒时申请的 GPU 型号").Menu(func(m *ui.Menu) {
+				for _, g := range gpuChoices {
+					if m.Item(g).Radio(g == a.gpu).Chosen() {
+						a.setGPU(g)
+					}
+				}
+			})
+		}
+	})
+}
+
+// chatSlot holds the steps after the wake in one place of steady width: load a model,
+// watch it load, open the chat.
+func (a *App) chatSlot(c *ui.Context, p Palette) {
+	const w = 116
+	_, _, online := a.servedModel()
+	switch {
+	case a.loadingModel():
+		label := "装载中…"
+		if st := a.status; st != nil && a.connected && st.TaskProgress > 0 {
+			label = fmt.Sprintf("装载中 %.0f%%", clamp01(st.TaskProgress)*100)
+		}
+		busyButton(c.Key("loading"), p, label).MinWidth(w)
+	case online:
+		off := ""
+		if a.tsURL == "" {
+			off = "没配置 Tailscale 地址：去「连接」页填写"
+		}
+		act(inkButton(c.Key("web"), p, "打开网页对话").MinWidth(w), p, off, a.openWeb)
+	case a.connected:
+		load := inkButton(c.Key("load"), p, "加载模型 ▾").MinWidth(w)
+		if len(a.catalog) == 0 {
+			act(load, p, "模型库是空的："+noModelsHint, nil)
+			return
+		}
+		load.Menu(a.modelMenu("", false))
+	default:
+		off := "先唤醒实例并加载模型"
+		switch {
+		case a.waking:
+			off = "唤醒完成并加载模型后可用"
+		case a.acct.Active > 0:
+			off = "云端服务端没连上：找回地址或重新部署后可用"
+		}
+		act(outlineButton(c.Key("web"), p, "打开网页对话").MinWidth(w), p, off, nil)
+	}
+}
+
+// modelMenu lists the model library; choosing a model asks before it replaces what runs.
+func (a *App) modelMenu(cur string, online bool) func(*ui.Menu) {
+	return func(menu *ui.Menu) {
+		for i := range a.catalog {
+			mm := &a.catalog[i]
+			serving := online && mm.ID == cur
+			if menu.Item(modelLabel(mm)).Checked(serving).Chosen() && !serving {
+				a.switchTarget, a.askSwitch = mm.ID, true
+			}
+		}
+	}
+}
+
+// keepButton resets the idle countdown. In the last five minutes before the automatic
+// release it turns to the warning color and counts down itself.
+func (a *App) keepButton(c *ui.Context, p Palette) {
+	label, urgent := "续时", false
+	if st := a.status; st != nil && a.connected && st.IdleTimeoutMin > 0 && st.IdleRemaining >= 0 {
+		if rem := int(a.idleRemainingAt(a.now())); rem <= 300 {
+			label, urgent = fmt.Sprintf("续时 %d:%02d", rem/60, rem%60), true
+		}
+	}
+	off := ""
+	if !a.connected {
+		off = "没有连上的实例，不需要续时"
+	}
+	if urgent {
+		act(warnButton(c.Key("touch"), p, label).Label("续时").Tooltip("快被自动释放了：点一下重置闲置倒计时"), p, off, a.touch)
+		return
+	}
+	act(outlineButton(c.Key("touch"), p, label).Tooltip("重置闲置自动释放倒计时"), p, off, a.touch)
+}
+
 // ─── Left rail ────────────────────────────────────────────────────────────────
 
+// nav is the left rail: the pages and the model library scroll, and the account stays at
+// its foot however long the library is.
 func (a *App) nav(c *ui.Context, p Palette) {
-	ui.Scroll(c).Fill().Background(p.Panel).Padding(16, 14).Gap(4).Children(func() {
+	ui.Column(c).Fill().Background(p.Panel).Children(func() {
+		a.navList(c, p)
+		ui.Row(c).Padding(10, 14, 12, 14).Gap(8).AlignItems(ui.Center).BorderWidth(1, 0, 0, 0).BorderColor(p.Border).Children(func() {
+			a.accountChip(c, p)
+			a.themeButton(c, p)
+		})
+	})
+}
+
+func (a *App) navList(c *ui.Context, p Palette) {
+	ui.Scroll(c).Grow(1).Padding(16, 14).Gap(4).Children(func() {
 		a.navItem(c, p, "dashboard", "仪表盘", "算力 · 模型 · 接入")
-		a.navItem(c, p, "connection", "连接与账号", "Google 账号 · 唤醒 · 自动释放")
+		a.navItem(c, p, "connection", "连接", "实例 · 服务地址 · 自动释放")
 
 		ui.Row(c).Margin(18, 4, 6, 4).Children(func() {
 			ui.Text(c, "模型").Font(fontSerif).FontSize(18).Grow(1)
@@ -136,21 +333,76 @@ func (a *App) nav(c *ui.Context, p Palette) {
 		})
 		served, _, online := a.servedModel()
 		for i := range a.catalog {
-			a.modelRow(c, p, &a.catalog[i], online && served != "" && served == a.catalog[i].ID, i)
+			a.modelRow(c, p, &a.catalog[i], online && served != "" && served == a.catalog[i].ID, online, i)
 		}
 		if len(a.catalog) == 0 {
 			ui.Text(c.Key("no-models"), noModelsHint).FontSize(12).TextColor(p.Text3).Margin(0, 4, 6, 4)
 		}
-
-		ui.Spacer(c).MinHeight(20)
-		themeIdx := 0
-		if a.themeName == "light" {
-			themeIdx = 1
-		}
-		if ui.Segmented(c, &themeIdx, "深色", "浅色").Label("配色").Changed() {
-			a.setTheme(map[int]string{0: "dark", 1: "light"}[themeIdx])
-		}
 	})
+}
+
+// accountChip is who is signed in. Binding is done once, so the account takes one quiet
+// row at the foot of the rail; its menu holds what is done to it once in a while.
+func (a *App) accountChip(c *ui.Context, p Palette) {
+	switch {
+	case !a.acct.Known:
+		ui.Text(c.Key("acct-wait"), "正在查询账号…").FontSize(12).TextColor(p.Text3).SingleLine().Grow(1).Shrink(1).MinWidth(40)
+	case !a.acct.LoggedIn:
+		off := ""
+		if a.authBusy {
+			off = "正在生成授权链接"
+		}
+		act(outlineButton(c.Key("acct-signin"), p, "登录 Google 账号").Grow(1), p, off, a.startBinding)
+	default:
+		chip := ui.ButtonBase(c.Key("account")).Grow(1).Shrink(1).MinWidth(60).Padding(8, 10).Radius(10).
+			Cursor(ui.CursorPointer).TextColor(p.Text2).Label("账号").Tooltip("账号：换号、刷新余额、退出")
+		bg, border := ui.Transparent, p.Border
+		if chip.Hovered() {
+			bg, border = p.Raised.Alpha(0.55), p.BorderStrong
+		}
+		chip.Background(bg).Border(1, border).Transition(colorMotion).Children(func() {
+			ui.Row(c).Gap(8).AlignItems(ui.Center).FillWidth().Children(func() {
+				dot(c, p.Success, 8)
+				ui.Text(c, maskEmail(a.acct.Email)).FontSize(13).TextColor(p.Text).SingleLine().Grow(1).Shrink(1).MinWidth(30)
+				ui.Icon(c, iconMore).Size(16, 16)
+			})
+		})
+		chip.Menu(func(m *ui.Menu) {
+			if m.Item("换号").Disabled(a.authBusy).Chosen() {
+				a.startBinding()
+			}
+			if m.Item("刷新余额").Chosen() {
+				a.once("acct", a.refreshAccount)
+			}
+			m.Separator()
+			if m.Item("退出账号").Danger().Chosen() {
+				a.askLogout = true
+			}
+		})
+		confirmHere(c, p, chip, &a.askLogout, "退出 Google 账号？",
+			"退出后查不到账本、也不能唤醒或释放实例；已在运行的实例会继续计费。", "确认退出", true, a.logout)
+	}
+}
+
+// themeButton switches between the dark and the light theme; it shows the one in use.
+func (a *App) themeButton(c *ui.Context, p Palette) {
+	icon, to, label := iconMoon, "light", "切换到浅色"
+	if a.themeName == "light" {
+		icon, to, label = iconSun, "dark", "切换到深色"
+	}
+	b := ui.ButtonBase(c.Key("theme")).Size(34, 34).Radius(8).Justify(ui.Center).AlignItems(ui.Center).
+		Cursor(ui.CursorPointer).TextColor(p.Text2).Label(label).Tooltip(label)
+	bg := ui.Transparent
+	if b.Hovered() {
+		bg = p.Raised
+	}
+	press := ui.Pose{}
+	if b.Pressed() {
+		press.Scale = 0.92
+	}
+	b.Background(bg).Transition(colorMotion).AnimatePose(press, springLift).
+		Children(func() { ui.Icon(c, icon).Size(16, 16) }).
+		OnClick(func() { a.setTheme(to) })
 }
 
 func (a *App) navItem(c *ui.Context, p Palette, page, title, sub string) {
@@ -187,7 +439,9 @@ func (a *App) navRow(c *ui.Context, p Palette, title, sub string, active bool) u
 	})
 }
 
-func (a *App) modelRow(c *ui.Context, p Palette, m *Model, running bool, i int) {
+// modelRow is a model of the library. anyOnline says some model is being served, which
+// makes loading this one a switch.
+func (a *App) modelRow(c *ui.Context, p Palette, m *Model, running, anyOnline bool, i int) {
 	box := ui.Column(c.Key(m.ID)).Padding(10, 12).Radius(10).Gap(3).Background(p.Card)
 	border := p.Border
 	switch {
@@ -209,9 +463,21 @@ func (a *App) modelRow(c *ui.Context, p Palette, m *Model, running bool, i int) 
 			case a.switching == m.ID:
 				pill(c, "加载中", p.Warning)
 			default:
-				outlineButton(c.Key("switch-"+m.ID), p, "切换").Padding(3, 10).FontSize(12).
-					Label("切换到 "+m.Name).Disabled(!a.connected || a.switching != "").
-					OnClick(func() { a.switchTarget, a.askSwitch = m.ID, true })
+				verb, label := "加载", "加载 "+m.Name
+				if anyOnline {
+					verb, label = "切换", "切换到 "+m.Name
+				}
+				off := ""
+				switch {
+				case !a.connected:
+					off = "先唤醒实例"
+				case a.loadingModel():
+					off = "另一个模型正在装载"
+				}
+				ask := ui.Local(box, "ask", func() bool { return false })
+				b := act(outlineButton(c.Key("switch-"+m.ID), p, verb).Padding(3, 10).FontSize(12).Label(label), p, off,
+					func() { *ask = true })
+				confirmHere(c, p, b, ask, label+"？", a.switchCost(), "确认"+verb, false, func() { a.switchTo(m.ID) })
 			}
 		})
 		tags := m.Tags
@@ -219,7 +485,7 @@ func (a *App) modelRow(c *ui.Context, p Palette, m *Model, running bool, i int) 
 			tags = tags[:2]
 		}
 		if line := modelSummary(tags, m.SizeGB); line != "" {
-			ui.Text(c, line).FontSize(12).TextColor(p.Text3).SingleLine()
+			ui.Text(c, line).FontSize(12).TextColor(p.Text3).SingleLine().Tooltip(line)
 		}
 		if a.switching == m.ID {
 			// A shimmer along the row's foot while its model downloads and loads.
@@ -253,8 +519,10 @@ func pageHeader(c *ui.Context, p Palette, title, sub string) {
 	h := ui.Column(c.Key("header")).Gap(6)
 	arrive(c, h, 0, false)
 	h.Children(func() {
-		ui.Text(c, title).Font(fontSerif).FontSize(34)
-		ui.Text(c, sub).FontSize(14).TextColor(p.Text3).ContentTransition(numeric)
+		ui.Text(c, title).Font(fontSerif).FontSize(34).Balance()
+		if sub != "" {
+			ui.Text(c.Key("sub"), sub).FontSize(14).FontFeatures("tnum").TextColor(p.Text3).Pretty().ContentTransition(numeric)
+		}
 	})
 }
 
@@ -275,7 +543,7 @@ func (a *App) logBody(c *ui.Context, p Palette) ui.Element {
 			ghostButton(c, p, "复制").OnClick(func() {
 				a.copy(strings.Join(append(append([]string{}, a.serverLog...), a.logs...), "\n"), "已复制日志")
 			})
-			ghostButton(c, p, "清空").OnClick(func() { a.logs, a.serverLog = nil, nil })
+			ghostButton(c, p, "清空").OnClick(a.clearLogs)
 			ghostButton(c, p, "收起").OnClick(func() { a.logsOpen = false })
 		})
 		ui.Scroll(c).Grow(1).Padding(12).Radius(10).Background(p.Card).Border(1, p.Border).Gap(3).Children(func() {
@@ -299,30 +567,65 @@ func (a *App) logBody(c *ui.Context, p Palette) ui.Element {
 
 // ─── Confirmations ────────────────────────────────────────────────────────────
 
+// Confirmations come in two sizes. Releasing cuts every way in at once and asks in a
+// dialog; so does a model picked from a menu, which leaves nothing on screen to anchor
+// to. What touches one thing (a model's row, unloading, signing out) asks right under
+// its button (confirmHere), and what can be taken back (clearing the log) is done at once
+// with an Undo.
 func (a *App) dialogs(c *ui.Context) {
 	if ui.AlertDialog(c, &a.askRelease, "释放全部 Colab 实例？",
 		"会立即停止扣费；云端的模型、网页对话、Magpie 和 MCP 都会断开。", "取消", "释放") == 1 {
 		a.release()
 	}
-	curID, cur, _ := a.servedModel()
-	if m := a.modelByID(curID); m != nil {
-		cur = m.Name
-	}
-	msg := "下载并装载要几分钟。"
-	if cur != "" {
-		msg = "云端正在运行 " + cur + "，切换会先停掉它：网页、Magpie 和 MCP 里正在进行的对话会中断。新模型下载并装载要几分钟。"
-	}
-	if ui.AlertDialog(c, &a.askSwitch, "切换到 "+a.modelName(a.switchTarget)+"？", msg, "取消", "切换") == 1 {
+	if ui.AlertDialog(c, &a.askSwitch, "切换到 "+a.modelName(a.switchTarget)+"？", a.switchCost(), "取消", "切换") == 1 {
 		a.switchTo(a.switchTarget)
 	}
-	if ui.AlertDialog(c, &a.askLogout, "退出 Google 账号？",
-		"退出后查不到账本、也不能唤醒或释放实例；已在运行的实例会继续计费。", "取消", "退出") == 1 {
-		a.logout()
+}
+
+// switchCost says what loading another model costs: what stops, and how long it takes.
+func (a *App) switchCost() string {
+	id, cur, _ := a.servedModel()
+	if m := a.modelByID(id); m != nil {
+		cur = m.Name
 	}
-	id, _, _ := a.servedModel()
-	if ui.AlertDialog(c, &a.askUnload, "卸载 "+a.modelName(id)+"？",
-		"释放显存，网页对话会断开；GPU 仍在计费，不用了请点「释放」。", "取消", "卸载") == 1 {
-		a.unload(id)
+	if cur == "" {
+		return "下载并装载要几分钟。"
+	}
+	return "云端正在运行 " + cur + "，切换会先停掉它：网页、Magpie 和 MCP 里正在进行的对话会中断。新模型下载并装载要几分钟。"
+}
+
+// confirmHere asks about one action in a small panel under the button that started it:
+// what it costs and the two answers. A click elsewhere or Escape is a no.
+func confirmHere(c *ui.Context, p Palette, anchor ui.Element, open *bool, title, cost, yes string, danger bool, do func()) {
+	ui.Popover(c, anchor, open, func() {
+		ui.Column(c).Width(300).Padding(14).Gap(10).Children(func() {
+			ui.Text(c, title).FontSize(14).FontWeight(650).Balance()
+			ui.Text(c, cost).FontSize(13).TextColor(p.Text2).Pretty()
+			ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
+				ghostButton(c.Key("no"), p, "取消").Padding(4, 12).OnClick(func() { *open = false })
+				button := outlineButton
+				if danger {
+					button = dangerButton
+				}
+				button(c.Key("yes"), p, yes).Padding(4, 12).OnClick(func() {
+					*open = false
+					do()
+				})
+			})
+		})
+	})
+}
+
+// clearLogs empties the log at once and offers to take it back.
+func (a *App) clearLogs() {
+	local, server := a.logs, a.serverLog
+	a.logs, a.serverLog = nil, nil
+	a.toast, a.toastAt = "已清空日志", a.now()
+	a.toastUndo = func() {
+		a.logs = append(local, a.logs...)
+		if a.serverLog == nil { // else the next poll already brought the server's lines back
+			a.serverLog = server
+		}
 	}
 }
 
@@ -359,6 +662,9 @@ func styleButton(b ui.Element, bg, hover, fg, border ui.Color) ui.Element {
 	return b.Transition(colorMotion).AnimatePose(press, springLift)
 }
 
+// The button kinds, from loudest to quietest. ink is the one step that comes next and
+// there is one of it on screen; outline is what can be done besides; ghost is a tool;
+// danger and warn say what a click costs or how soon it is needed.
 func inkButton(c *ui.Context, p Palette, label string) ui.Element {
 	return styleButton(ui.Button(c, label), p.Ink, p.InkHover, p.InkText, p.Ink)
 }
@@ -379,6 +685,36 @@ func accentButton(c *ui.Context, p Palette, label string) ui.Element {
 	return styleButton(ui.Button(c, label), p.Accent, p.AccentHover, p.AccentText, p.Accent)
 }
 
+func warnButton(c *ui.Context, p Palette, label string) ui.Element {
+	return styleButton(ui.Button(c, label), p.Warning.Alpha(0.14), p.Warning.Alpha(0.26), p.Warning, p.Warning.Alpha(0.55))
+}
+
+// act wires a button to fn. Given why it cannot be used now, the button is grayed out
+// instead (no fill, no border, muted text) and says so under the pointer. It is not
+// Disabled, which would also take the tooltip away: it stays hoverable and has no click.
+func act(b ui.Element, p Palette, off string, fn func()) ui.Element {
+	if off == "" {
+		if fn != nil {
+			b.OnClick(fn)
+		}
+		return b
+	}
+	return b.AccessDisabled(true).Cursor(ui.CursorDefault).Background(ui.Transparent).Border(1, ui.Transparent).
+		TextColor(p.Muted).AnimatePose(ui.Pose{}, springLift).Tooltip(off)
+}
+
+// busyButton stands where a button will be while its job runs: nothing to click, and a
+// band of light travelling along its foot until the job is done.
+func busyButton(c *ui.Context, p Palette, label string) ui.Element {
+	band := p.Warning
+	return ui.Row(c).Padding(7, 16).Radius(8).Justify(ui.Center).AlignItems(ui.Center).Clip().
+		Background(p.Raised).Border(1, p.Raised).Label(label).Children(func() {
+		ui.Text(c, label).FontSize(13).FontWeight(600).FontFeatures("tnum").TextColor(p.Text2).NoWrap().ContentTransition(numeric)
+		ui.Box(c).Absolute().Left(0).Right(0).Bottom(0).Height(2).IgnoreInput(true).
+			Draw(func(pt *ui.Painter, r ui.Rect) { sweep(pt, r, band, 0) })
+	})
+}
+
 // card is the page's unit: a serif title, a quiet subtitle, an optional badge. It rises
 // in order (nth) when its page shows, and its border brightens under the pointer.
 func card(c *ui.Context, p Palette, nth int, title, sub string, badge func(), body func()) ui.Element {
@@ -392,9 +728,9 @@ func card(c *ui.Context, p Palette, nth int, title, sub string, badge func(), bo
 	return box.Children(func() {
 		ui.Row(c).Gap(12).AlignItems(ui.Start).Children(func() {
 			ui.Column(c).Grow(1).Shrink(1).Gap(4).Children(func() {
-				ui.Text(c, title).Font(fontSerif).FontSize(22)
+				ui.Text(c, title).Font(fontSerif).FontSize(22).Balance()
 				if sub != "" {
-					ui.Text(c, sub).FontSize(13).TextColor(p.Text3)
+					ui.Text(c, sub).FontSize(13).TextColor(p.Text3).Pretty()
 				}
 			})
 			if badge != nil {

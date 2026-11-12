@@ -47,6 +47,15 @@ var (
 		Enter:     &ui.Motion{Collapse: true, Y: -6},
 		Exit:      &ui.Motion{Collapse: true, Y: -6},
 	}
+	// What shows a job in flight (its stages, its latest line) opens as a row does and is
+	// gone at once when the job ends: the window is still again within the second.
+	liveMotion = ui.ElementTransition{
+		Animation:    &springSize,
+		Enter:        &ui.Motion{Collapse: true, Y: -6},
+		Exit:         &ui.Motion{Collapse: true},
+		ExitDuration: 160 * time.Millisecond,
+		ExitEase:     ui.EaseOut,
+	}
 	numeric     = ui.ContentTransition{Numeric: true}
 	numericDown = ui.ContentTransition{Numeric: true, Down: true}
 	morph       = ui.ContentTransition{Morph: true}

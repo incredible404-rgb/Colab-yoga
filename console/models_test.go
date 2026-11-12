@@ -228,8 +228,14 @@ func TestCustomModelAppearsInRailAndSwitchMenu(t *testing.T) {
 	if err := tt.Click("切换到 My-70B-Instruct-Q5_K_M"); err != nil {
 		t.Fatal(err)
 	}
-	if !a.askSwitch || a.switchTarget != "my-70b" {
-		t.Errorf("switch must ask first for the custom model: %v %q", a.askSwitch, a.switchTarget)
+	if a.switching != "" || !hasTextPart(tt, "确认切换") {
+		t.Fatalf("switch must ask first for the custom model: switching=%q texts %q", a.switching, tt.Texts())
+	}
+	if err := tt.Click("确认切换"); err != nil {
+		t.Fatal(err)
+	}
+	if a.switching != "my-70b" {
+		t.Errorf("confirming must load the custom model: switching=%q", a.switching)
 	}
 }
 
