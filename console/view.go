@@ -180,7 +180,7 @@ func (a *App) wakeOff() string {
 // runtime bills without its server. With a server connected the step is done: it keeps
 // its place, dimmed and ticked.
 func (a *App) wakeSlot(c *ui.Context, p Palette) {
-	ui.Row(c.Key("wake-slot")).Gap(1).MinWidth(104).Children(func() {
+	ui.Row(c.Key("wake-slot")).MinWidth(104).Children(func() {
 		off := a.wakeOff()
 		switch {
 		case a.waking:
@@ -198,23 +198,14 @@ func (a *App) wakeSlot(c *ui.Context, p Palette) {
 		default:
 			// Filled only as the next step: a model already answering on the tailnet makes
 			// the chat the next step and this a plain button.
-			button := inkButton
-			if _, _, online := a.servedModel(); online {
-				button = outlineButton
-			}
-			act(button(c.Key("wake"), p, "唤醒 "+a.gpu).Grow(1).Radius(8, 0, 0, 8).Padding(7, 12, 7, 16), p, off, a.wake)
-			arrow := button(c.Key("wake-gpu"), p, "▾").Radius(0, 8, 8, 0).Padding(7, 9).Label("选择 GPU 型号")
-			if off != "" {
-				act(arrow, p, off, nil)
-				return
-			}
-			arrow.Tooltip("选择唤醒时申请的 GPU 型号").Menu(func(m *ui.Menu) {
+			_, _, online := a.servedModel()
+			splitButton(c.Key("wake"), p, "唤醒 "+a.gpu, "选择 GPU 型号", "选择唤醒时申请的 GPU 型号", !online, off, a.wake, func(m *ui.Menu) {
 				for _, g := range gpuChoices {
 					if m.Item(g).Radio(g == a.gpu).Chosen() {
 						a.setGPU(g)
 					}
 				}
-			})
+			}).Grow(1)
 		}
 	})
 }
@@ -802,6 +793,58 @@ func act(b ui.Element, p Palette, off string, fn func()) ui.Element {
 	}
 	return b.AccessDisabled(true).Cursor(ui.CursorDefault).Background(ui.Transparent).Border(1, ui.Transparent).
 		TextColor(p.Off).AnimatePose(ui.Pose{}, springLift).Tooltip(off)
+}
+
+// splitButton is one button of two halves: its label acts, its arrow opens a menu of
+// what to act on. The row draws the face and the halves only tint it, so the two are one
+// shape whatever line heights their contents have: as two buttons side by side, the label
+// and a "▾" came out 35 and 33 DIPs high in the real window, with a seam between them.
+// The arrow is drawn, not a glyph, and a short rule parts the halves. filled makes it the
+// step that comes next; off, when not empty, grays it out and says why.
+func splitButton(c *ui.Context, p Palette, label, arrowLabel, arrowTip string, filled bool, off string, do func(), menu func(*ui.Menu)) ui.Element {
+	bg, hover, fg, border := ui.Transparent, p.Raised, p.Text, p.BorderStrong
+	if filled {
+		bg, hover, fg, border = p.Ink, p.InkHover, p.InkText, p.Ink
+	}
+	if off != "" {
+		bg, hover, fg, border = ui.Transparent, ui.Transparent, p.Off, ui.Transparent
+	}
+	half := func(h ui.Element) ui.Element {
+		face := hover.Alpha(0)
+		if off == "" && h.Hovered() {
+			face = hover
+		}
+		h.Background(face).Transition(colorMotion)
+		if off != "" {
+			return h.AccessDisabled(true).Cursor(ui.CursorDefault).Tooltip(off)
+		}
+		return h.Cursor(ui.CursorPointer)
+	}
+	var body ui.Element
+	row := ui.Row(c).AlignItems(ui.Stretch).Radius(8).Clip().Background(bg).Border(1, border).Transition(colorMotion)
+	row.Children(func() {
+		body = half(ui.ButtonBase(c.Key("body")).Grow(1).Padding(7, 12, 7, 15))
+		body.Children(func() {
+			t := ui.Text(c, label).FontSize(13).FontWeight(600).SingleLine()
+			t.TextColor(t.AnimateColor("c", fg, fadeColor))
+		})
+		ui.Box(c).Width(1).Margin(8, 0).Background(fg.Alpha(0.22))
+		arrow := half(ui.ButtonBase(c.Key("arrow")).Width(30).Label(arrowLabel))
+		arrow.Children(func() {
+			ui.Box(c).Size(10, 6).Draw(func(pt *ui.Painter, r ui.Rect) {
+				pt.StrokePolyline([][2]float32{{r.X + 1, r.Y + 1}, {r.X + 5, r.Y + 5}, {r.X + 9, r.Y + 1}}, 1.6, fg)
+			})
+		})
+		if off == "" {
+			body.OnClick(do)
+			arrow.Tooltip(arrowTip).Menu(menu)
+		}
+	})
+	press := ui.Pose{}
+	if off == "" && body.Pressed() {
+		press.Scale = 0.97
+	}
+	return row.AnimatePose(press, springLift)
 }
 
 // doneStep stands where a step's button was once the step is done: dimmed and ticked, it

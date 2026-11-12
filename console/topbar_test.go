@@ -600,3 +600,84 @@ func TestGrayedButtonsStayGrayUnderThePointer(t *testing.T) {
 		}
 	}
 }
+
+// TestWakeButtonIsOnePiece: the wake button's two halves are one shape. Measured in the
+// frame: the filled face is as high under the arrow as under the label, and between them
+// nothing cuts it from top to bottom.
+func TestWakeButtonIsOnePiece(t *testing.T) {
+	a := fakeApp(t)
+	stateIdle(a)
+	tt := ui.NewTesterWith(a.view, 1024, 640, ui.TesterOptions{Dark: true})
+	tt.Advance(2 * time.Second)
+	label, ok1 := tt.Find("唤醒 G4")
+	arrow, ok2 := tt.Find("选择 GPU 型号")
+	if !ok1 || !ok2 || arrow.X < label.X+label.W {
+		t.Fatalf("no split wake button: label %+v (%v), arrow %+v (%v)", label, ok1, arrow, ok2)
+	}
+	img, ink := tt.Image(), darkPalette.Ink
+	face := func(x int) (top, bottom int) {
+		top, bottom = -1, -1
+		for y := 0; y < 60; y++ {
+			if c := img.RGBAAt(x, y); c.R == ink.R && c.G == ink.G && c.B == ink.B {
+				if top < 0 {
+					top = y
+				}
+				bottom = y
+			}
+		}
+		return top, bottom
+	}
+	top, bottom := face(int(label.X) - 6)
+	if at, ab := face(int(arrow.X) + 4); top < 0 || bottom-top < 28 || at != top || ab != bottom {
+		t.Errorf("the halves differ: the face spans y %d-%d under the label and %d-%d under the arrow", top, bottom, at, ab)
+	}
+	for x := int(label.X + label.W); x <= int(arrow.X)+1; x++ {
+		if xt, xb := face(x); xt != top || xb != bottom {
+			t.Errorf("x=%d, between the halves: the face spans y %d-%d, not %d-%d", x, xt, xb, top, bottom)
+		}
+	}
+}
+
+// TestSignInCanBePassedBy: with no account bound the console is still within reach, for
+// the log and the server address when the authorization itself is what fails. What needs
+// an account stays grayed out, and signing in is one click away at the foot of the rail.
+func TestSignInCanBePassedBy(t *testing.T) {
+	a := fakeApp(t)
+	stateIdle(a)
+	a.acct.LoggedIn = false
+	tt := ui.NewTesterWith(a.view, 1024, 640, ui.TesterOptions{Dark: true})
+	tt.Advance(time.Second)
+	if _, ok := tt.Find("仪表盘"); ok {
+		t.Fatal("unbound and unconnected, the window opens on the sign-in page")
+	}
+	if err := tt.Click("先不登录，进入控制台"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	tt.Advance(2 * time.Second)
+	for _, want := range []string{"仪表盘", "连接", "日志", "登录 Google 账号", "唤醒 G4"} {
+		if _, ok := tt.Find(want); !ok {
+			t.Errorf("past the sign-in page the console lacks %q; texts %q", want, tt.Texts())
+		}
+	}
+	if err := tt.Click("唤醒 G4"); err != nil || a.waking {
+		t.Errorf("waking needs an account and must stay grayed out: err=%v waking=%v", err, a.waking)
+	}
+	if err := tt.Click("登录 Google 账号"); err != nil || !a.authBusy {
+		t.Errorf("the rail must offer to sign in: err=%v busy=%v", err, a.authBusy)
+	}
+	a.authBusy, a.binding = false, true // the authorization page was opened
+	tt.Frame()
+	tt.Advance(time.Second)
+	if _, ok := tt.Find("粘贴授权码"); !ok {
+		t.Fatalf("no code page; texts %q", tt.Texts())
+	}
+	if err := tt.Click("取消"); err != nil {
+		t.Fatal(err)
+	}
+	tt.Frame()
+	tt.Advance(time.Second)
+	if _, ok := tt.Find("仪表盘"); !ok || a.binding {
+		t.Errorf("cancelling goes back to the console, not to the sign-in page; texts %q", tt.Texts())
+	}
+}

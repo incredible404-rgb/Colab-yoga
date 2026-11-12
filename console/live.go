@@ -135,11 +135,11 @@ func stageTrack(c *ui.Context, p Palette, key string, names []string, cur int, f
 	})
 }
 
-// tickMark draws the tick of what is done.
+// tickMark draws the tick of what is done. (Painter.Line draws only level and upright
+// lines; what slants is a polyline.)
 func tickMark(c *ui.Context, col ui.Color) ui.Element {
 	return ui.Box(c).Size(12, 12).Draw(func(pt *ui.Painter, r ui.Rect) {
-		pt.Line(r.X+1.6, r.Y+6.4, r.X+4.8, r.Y+9.4, 1.8, col)
-		pt.Line(r.X+4.8, r.Y+9.4, r.X+10.4, r.Y+2.8, 1.8, col)
+		pt.StrokePolyline([][2]float32{{r.X + 1.8, r.Y + 6.4}, {r.X + 4.8, r.Y + 9.4}, {r.X + 10.4, r.Y + 2.8}}, 1.8, col)
 	})
 }
 
@@ -187,7 +187,7 @@ func stageNode(c *ui.Context, p Palette, n int, done, on, failed bool) {
 // server is connected that the console could still manage, and while an authorization
 // code is awaited (the first binding, or the account menu's 换号).
 func (a *App) signingIn() bool {
-	return a.binding || (a.acct.Known && !a.acct.LoggedIn && !a.connected)
+	return a.binding || (a.acct.Known && !a.acct.LoggedIn && !a.connected && !a.skipSignIn)
 }
 
 // signInPage is all the window shows until a Google account is bound. Binding is done
@@ -217,6 +217,16 @@ func (a *App) signInPage(c *ui.Context, p Palette) {
 			}
 			act(inkButton(c.Key("signin"), p, label).Margin(6, 0, 0, 0), p, off, a.startBinding)
 			ui.Text(c, "会在浏览器打开 Google 授权页，授权后把页面上的授权码粘贴回来。").FontSize(12).TextColor(p.Text3)
+			// Signing in can be passed by: the log and the server address are worth reaching
+			// most when the authorization itself is what fails.
+			skip := ui.Button(c.Key("signin-skip"), "先不登录，进入控制台").Padding(4, 0).Radius(4).
+				Background(ui.Transparent).Border(1, ui.Transparent).FontSize(12).
+				Tooltip("不登录也能看日志、手填服务地址；唤醒和查余额要先登录")
+			col := p.Text3
+			if skip.Hovered() {
+				col = p.Text
+			}
+			skip.TextColor(skip.AnimateColor("c", col, fadeColor)).OnClick(func() { a.skipSignIn = true })
 		})
 	})
 }

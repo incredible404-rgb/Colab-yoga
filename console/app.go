@@ -87,6 +87,7 @@ type App struct {
 	askUnload         bool
 	switchTarget      string
 	binding           bool   // waiting for the Google authorization code
+	skipSignIn        bool   // the sign-in page was passed by for now: the console shows with no account bound
 	authCode          string // pasted code; cleared right after use, never logged
 	tokenStale        bool   // a control call was refused; the next discover refreshes the token
 	authBusy          bool
@@ -430,7 +431,7 @@ func (a *App) submitAuthCode() {
 				a.flash("绑定失败：" + msg)
 				return
 			}
-			a.binding = false
+			a.binding, a.skipSignIn = false, false
 			a.flash("已绑定 Google 账号")
 		})
 		a.refreshAccount()
