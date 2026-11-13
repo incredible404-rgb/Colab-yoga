@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"syscall"
@@ -23,7 +24,11 @@ func pidAlive(pid int) bool {
 		return false
 	}
 	p, err := os.FindProcess(pid)
-	return err == nil && p.Signal(syscall.Signal(0)) == nil
+	if err != nil {
+		return false
+	}
+	sigErr := p.Signal(syscall.Signal(0))
+	return sigErr == nil || errors.Is(sigErr, syscall.EPERM)
 }
 
 func trimWorkingSet() {}

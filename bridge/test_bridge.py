@@ -1511,5 +1511,66 @@ class AuthStatusLedgerTests(unittest.TestCase):
         self.assertEqual(json.loads(self.path.read_text(encoding="utf-8"))["balance"], 81.0)
 
 
+class MacosBridgePathTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def test_local_app_data_follows_platform_defaults_and_env(self) -> None:
+        saved = cb.sys.platform
+        try:
+            cb.sys.platform = "darwin"
+            self.assertEqual(
+                cb._local_app_data(env={}, home="/Users/alice"),
+                os.path.join("/Users/alice", "Library", "Application Support"),
+            )
+            self.assertEqual(
+                cb._local_app_data(env={"LOCALAPPDATA": "/custom"}, home="/Users/alice"),
+                "/custom",
+            )
+            cb.sys.platform = "win32"
+            self.assertEqual(
+                cb._local_app_data(env={}, home="/Users/alice"),
+                os.path.join("/Users/alice", "AppData", "Local"),
+            )
+            cb.sys.platform = "linux"
+            self.assertEqual(
+                cb._local_app_data(env={"XDG_DATA_HOME": "/xdg"}, home="/home/alice"),
+                "/xdg",
+            )
+        finally:
+            cb.sys.platform = saved
+
+    def test_posix_bundled_runtime_python3_is_used_for_keeper_and_mcp(self) -> None:
+        install = self.tmp / "app"
+        (install / "runtime" / "bin").mkdir(parents=True)
+        (install / "bridge").mkdir()
+        py3 = install / "runtime" / "bin" / "python3"
+        py3.write_bytes(b"")
+        fake_file = str(install / "bridge" / "colab_yoga_bridge.py")
+        saved_file = cb.__file__
+        cb.__file__ = fake_file
+        try:
+            self.assertEqual(cb._keeper_python(), str(py3))
+            self.assertEqual(cb._local_mcp_python(), str(py3))
+        finally:
+            cb.__file__ = saved_file
+
+    def test_local_mcp_script_found_in_macos_application_support(self) -> None:
+        home = self.tmp / "home"
+        helper = self.tmp / "svc" / "local_mcp.py"
+        helper.parent.mkdir(parents=True)
+        helper.write_text("", encoding="utf-8")
+        cfg_dir = home / "Library" / "Application Support" / "Colab-yoga"
+        cfg_dir.mkdir(parents=True)
+        (cfg_dir / "local_mcp_bridge.json").write_text(json.dumps({"script": str(helper)}), encoding="utf-8")
+        saved = cb.sys.platform
+        cb.sys.platform = "darwin"
+        try:
+            found = cb.local_mcp_script_path(install_dir=str(self.tmp / "app"), env={}, home=str(home))
+            self.assertEqual(found, str(helper))
+        finally:
+            cb.sys.platform = saved
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

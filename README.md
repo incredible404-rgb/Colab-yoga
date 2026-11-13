@@ -26,7 +26,7 @@
 
 | 目录 | 运行在 | 作用 |
 |---|---|---|
-| `console/` | 本机 | `Colab-yoga.exe`：Go + [MyGo](https://github.com/egoist/mygo) 原生界面，常驻托盘 |
+| `console/` | 本机 | `Colab-yoga.exe`（Windows）/ `Colab-yoga.app`（macOS）：Go + [MyGo](https://github.com/egoist/mygo) 原生界面，常驻托盘 / 菜单栏 |
 | `bridge/` | 本机 | `colab_yoga_bridge.py`：Google 账号、唤醒、找回地址、释放、后台保活（keeper） |
 | `server/` | Colab VM | `colab_yoga_server.py`：HTTP API、闲置看门狗、MCP 转发；`vm_boot.py`：唤醒时在 VM 内核里执行 |
 | `tools/` | 本机 | `install.py`：检查、构建、准备运行时与依赖、安装、快捷方式、配置迁移；`package.py`：打免安装包 |
@@ -35,40 +35,44 @@
 
 ## 从零开始（4 步跑通第一个模型）
 
-1. **登录**：解压免安装包，运行 `Colab-yoga.exe`，用 Google 账号登录。
+1. **登录**：解压免安装包，运行 `Colab-yoga.exe`（Windows）或打开 `Colab-yoga.app`（macOS），用 Google 账号登录。
 2. **配 Tailscale**：按 colab-gpu-llm-service 的说明配置一次 Tailscale Service，之后网页、API 和 MCP 都走这个地址。
-3. **导出模型清单**：克隆 [colab-gpu-llm-service](https://github.com/incredible404-rgb/colab-gpu-llm-service)，填好 `.secrets.json` 的 4 个必填项（`api_key`、`ts_client_id`、`ts_client_secret`、`tailnet_fqdn`），运行 `python -X utf8 scripts/colab_kernel.py --all`。它会自动写入 `%LOCALAPPDATA%\Colab-yoga\colab_kernel_runners.json`，管理台随即列出模型。
+3. **导出模型清单**：克隆 [colab-gpu-llm-service](https://github.com/incredible404-rgb/colab-gpu-llm-service)，填好 `.secrets.json` 的 4 个必填项（`api_key`、`ts_client_id`、`ts_client_secret`、`tailnet_fqdn`），运行 `python -X utf8 scripts/colab_kernel.py --all`（macOS 用 `python3`）。它会自动写入 `%LOCALAPPDATA%\Colab-yoga\colab_kernel_runners.json`（macOS 为 `~/Library/Application Support/Colab-yoga/colab_kernel_runners.json`），管理台随即列出模型。
 4. **开用**：回到管理台点「唤醒 G4」，加载模型后即可网页对话，或调用 `/v1` API。
 
 不装 colab-gpu-llm-service 也能用 Colab-yoga 单独登录、唤醒、保活和释放实例，只是没有模型可加载。
 
 ## 部署
 
-两种方式，都不依赖任何别的软件的安装目录；运行时的 Python 和依赖由 Colab-yoga 自己带。
+两种方式，都不依赖任何别的软件的安装目录；运行时的 Python 和依赖由 Colab-yoga 自己带。支持 **Windows 10/11 x64** 与 **macOS Apple Silicon (`darwin-arm64`)**。
 
 ### 方式一：下载免安装包
 
-1. 在 [Releases](https://github.com/incredible404-rgb/Colab-yoga/releases) 下载 `Colab-yoga-<版本>-windows-amd64.zip`（旁边有 `.sha256`）。
-2. 解压到任意位置，运行里面的 `Colab-yoga.exe`。不需要另外安装 Python；整个文件夹可以整体移动，但不要把 exe 单独拿出去。
-3. 设置和状态保存在 `%LOCALAPPDATA%\Colab-yoga`，不在解压目录里。免安装包不建快捷方式、不写注册表，删掉文件夹即卸载。
-4. 模型清单 `colab_kernel_runners.json`（colab-gpu-llm-service 的 `colab_kernel.py` 导出，含 API 密钥）和本机 MCP 配置 `local_mcp_bridge.json` 默认都写到 `%LOCALAPPDATA%\Colab-yoga`，管理台从那里自动读取，所以免安装包放在任意目录都不用手动拷文件；放在 `Colab-yoga.exe` 旁边的同名文件优先。包里不带这两个文件；没有模型清单时，模型列表为空并提示如何导出。
+1. 在 [Releases](https://github.com/incredible404-rgb/Colab-yoga/releases) 下载对应系统的免安装包：`Colab-yoga-<版本>-windows-amd64.zip` 或 `Colab-yoga-<版本>-darwin-arm64.zip`（旁边有 `.sha256`）。
+2. 解压到任意位置，运行里面的 `Colab-yoga.exe`（Windows）或打开 `Colab-yoga.app`（macOS；若从浏览器下载被 Gatekeeper 拦截，在终端执行一次 `xattr -cr Colab-yoga`）。不需要另外安装 Python；整个文件夹可以整体移动，但不要把 `Colab-yoga.exe` / `Colab-yoga.app` 单独拿出去。
+3. 设置和状态保存在 `%LOCALAPPDATA%\Colab-yoga`（Windows）或 `~/Library/Application Support/Colab-yoga`（macOS），不在解压目录里。免安装包不建快捷方式、不写注册表，删掉文件夹即卸载。
+4. 模型清单 `colab_kernel_runners.json`（colab-gpu-llm-service 的 `colab_kernel.py` 导出，含 API 密钥）和本机 MCP 配置 `local_mcp_bridge.json` 默认都写到上述配置目录，管理台从那里自动读取，所以免安装包放在任意目录都不用手动拷文件；放在可执行程序旁边的同名文件优先。包里不带这两个文件；没有模型清单时，模型列表为空并提示如何导出。
 
 ### 方式二：从源码安装
 
-前置：Windows 10/11 x64；[Go](https://go.dev/dl/) 1.27+；[PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows)（`pwsh`，建快捷方式和管理进程用）；[python.org](https://www.python.org/downloads/windows/) 的 Python 3.10 或更新（要带 pip，只用来跑安装脚本和 pip；管理台运行时用的 3.12 由安装脚本另外下载）。
+- **Windows 10/11 x64**：[Go](https://go.dev/dl/) 1.27+；[PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows)（`pwsh`，建快捷方式和管理进程用）；[python.org](https://www.python.org/downloads/windows/) 的 Python 3.10+（带 pip，只用来跑安装脚本和 pip；管理台运行时用的 3.12 由安装脚本另外下载）。
+- **macOS Apple Silicon (`arm64`)**：[Go](https://go.dev/dl/) 1.27+（或设 `GOTOOLCHAIN=auto` 自动拉取）与系统自带或 Homebrew 的 `python3`（独立 CPython 3.12.10 运行时自带 pip，由安装脚本自动下载并校验 SHA-256）。
 
 ```bash
 git clone https://github.com/incredible404-rgb/Colab-yoga.git
 cd Colab-yoga
+# Windows:
 py -3 tools/install.py
+# macOS:
+python3 tools/install.py
 ```
 
 这一条命令会：
 
-- 检查（语法、`go vet`、Go 测试、bridge 与 server 的单测），再构建 `Colab-yoga.exe`；
-- 下载 python.org 的 Windows 嵌入式 CPython 3.12.10 到 `%LOCALAPPDATA%\Programs\Colab-yoga\runtime`，校验 SHA-256；已有 `runtime\` 时不重复下载（离线时用 `--embed-zip <文件>` 指向同一个压缩包）；
-- 用宿主 Python 的 pip，按 [bridge/requirements.txt](bridge/requirements.txt) 把依赖装进 `site-packages\`：版本锁定、逐个 wheel 校验哈希、只装二进制包，目标固定为 CPython 3.12 / win_amd64，所以宿主 Python 不必是 3.12（不用 uv）；
-- 放好 `bridge\`、`server\`，建开始菜单和桌面快捷方式，并用自带的运行时做一次 bridge 自检。
+- 检查（语法、`go vet`、Go 测试、bridge 与 server 的单测），再构建 `Colab-yoga.exe` / `Colab-yoga.app`；
+- 下载独立 CPython 3.12.10 到安装目录的 `runtime/`（Windows 为 `%LOCALAPPDATA%\Programs\Colab-yoga\runtime`，macOS 为 `~/Library/Application Support/Programs/Colab-yoga/runtime`），校验 SHA-256；已有 `runtime/` 时不重复下载（离线时用 `--embed-zip <文件>` 指向同一个压缩包）；
+- 用 pip 按 [bridge/requirements.txt](bridge/requirements.txt) 把依赖装进 `site-packages/`：版本锁定、逐个 wheel 校验哈希、只装二进制包，目标固定为 CPython 3.12（`win_amd64` 或 `macosx_arm64`）；
+- 放好 `bridge/`、`server/`，建快捷方式（Windows 开始菜单与桌面 `.lnk`，macOS 为 `~/Applications/Colab-yoga.app` 符号链接），并用自带的运行时做一次 bridge 自检。
 
 重复运行就是升级：依赖版本没变就不会重新安装，正在运行的管理台会先关掉、装完再打开。想先看会做什么：加 `--dry-run`；想在别处试一遍：`--root <目录>`。
 
@@ -77,10 +81,13 @@ py -3 tools/install.py
 ### 自己打免安装包
 
 ```bash
+# Windows:
 py -3 tools/package.py --out <仓库之外的目录>
+# macOS:
+python3 tools/package.py --out <仓库之外的目录>
 ```
 
-按安装同样的流程在临时目录里组好，压成 `Colab-yoga-<版本>-windows-amd64.zip`（同目录有 `.sha256`），并审计内容：不含 `colab_kernel_runners.json`、`settings.json`、`keeper.json`、token 或凭据类文件、`.pyc`、密钥特征字符串，发现就删掉 zip 并报错。
+按安装同样的流程在临时目录里组好，压成 `Colab-yoga-<版本>-windows-amd64.zip` 或 `Colab-yoga-<版本>-darwin-arm64.zip`（同目录有 `.sha256`），并审计内容：不含 `colab_kernel_runners.json`、`settings.json`、`keeper.json`、token 或凭据类文件、`.pyc`、密钥特征字符串，发现就删掉 zip 并报错。
 
 ## 本机 MCP 桥
 

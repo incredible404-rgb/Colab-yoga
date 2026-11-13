@@ -131,12 +131,25 @@ func TestTrayOnlyPollsSlowlyAndNeverProbes(t *testing.T) {
 
 func TestPaths(t *testing.T) {
 	local := t.TempDir()
-	p := pathsFor(local, filepath.Join(local, "Programs", "Colab-yoga"))
-	if !strings.HasSuffix(p.Bridge, filepath.Join("Colab-yoga", "bridge", "colab_yoga_bridge.py")) ||
-		!strings.HasSuffix(p.Python, filepath.Join("Colab-yoga", "runtime", "python.exe")) ||
-		p.Settings != filepath.Join(local, "Colab-yoga", "settings.json") {
-		t.Errorf("paths %+v", p)
+	winP := pathsForOS("windows", local, filepath.Join(local, "Programs", "Colab-yoga"))
+	if !strings.HasSuffix(winP.Bridge, filepath.Join("Colab-yoga", "bridge", "colab_yoga_bridge.py")) ||
+		!strings.HasSuffix(winP.Python, filepath.Join("Colab-yoga", "runtime", "python.exe")) ||
+		!strings.HasSuffix(winP.PythonW, filepath.Join("Colab-yoga", "runtime", "pythonw.exe")) ||
+		winP.Settings != filepath.Join(local, "Colab-yoga", "settings.json") {
+		t.Errorf("windows paths %+v", winP)
 	}
+	macP := pathsForOS("darwin", local, filepath.Join(local, "Programs", "Colab-yoga"))
+	if !strings.HasSuffix(macP.Python, filepath.Join("Colab-yoga", "runtime", "bin", "python3")) ||
+		macP.PythonW != macP.Python ||
+		macP.Settings != filepath.Join(local, "Colab-yoga", "settings.json") {
+		t.Errorf("darwin paths %+v", macP)
+	}
+	if defaultLocalDir("darwin", "/Users/alice", "") != filepath.Join("/Users/alice", "Library", "Application Support") ||
+		defaultLocalDir("windows", `C:\Users\alice`, "") != filepath.Join(`C:\Users\alice`, "AppData", "Local") ||
+		defaultLocalDir("darwin", "/Users/alice", "/custom") != "/custom" {
+		t.Error("defaultLocalDir mismatch")
+	}
+	p := pathsFor(local, filepath.Join(local, "Programs", "Colab-yoga"))
 	if p.runnersFile() != "" {
 		t.Error("no runner file exists yet")
 	}
@@ -162,28 +175,41 @@ func TestPaths(t *testing.T) {
 }
 
 // A release package is unzipped anywhere: the exe then runs against its own directory,
-// while its settings stay in %LOCALAPPDATA%\Colab-yoga.
+// while its settings stay in %LOCALAPPDATA%\Colab-yoga (or ~/Library/Application Support/Colab-yoga).
 func TestPortableAppDir(t *testing.T) {
 	local := t.TempDir()
 	std := filepath.Join(local, "Programs", "Colab-yoga")
 	unzipped := filepath.Join(t.TempDir(), "Colab-yoga")
-	if got := appDirFor(local, unzipped); got != std {
+	if got := appDirForOS("windows", local, unzipped); got != std {
 		t.Errorf("an exe without a bridge dir next to it uses the standard install: %q", got)
 	}
-	if got := appDirFor(local, ""); got != std {
+	if got := appDirForOS("windows", local, ""); got != std {
 		t.Errorf("unknown exe dir: %q", got)
 	}
 	if err := os.MkdirAll(filepath.Join(unzipped, "bridge"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	_ = os.WriteFile(filepath.Join(unzipped, "bridge", "colab_yoga_bridge.py"), []byte("#"), 0o644)
-	if got := appDirFor(local, unzipped); got != unzipped {
+	if got := appDirForOS("windows", local, unzipped); got != unzipped {
 		t.Errorf("an exe with a bridge dir next to it runs from there: %q", got)
 	}
-	p := pathsFor(local, unzipped)
+	p := pathsForOS("windows", local, unzipped)
 	if p.Python != filepath.Join(unzipped, "runtime", "python.exe") ||
 		p.Settings != filepath.Join(local, "Colab-yoga", "settings.json") {
 		t.Errorf("portable paths %+v", p)
+	}
+	// On macOS, the binary runs inside <unzipped>/Colab-yoga.app/Contents/MacOS.
+	macExeDir := filepath.Join(unzipped, "Colab-yoga.app", "Contents", "MacOS")
+	if err := os.MkdirAll(macExeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := appDirForOS("darwin", local, macExeDir); got != unzipped {
+		t.Errorf("a .app bundle with bridge beside it runs from parent dir: %q", got)
+	}
+	mp := pathsForOS("darwin", local, unzipped)
+	if mp.Python != filepath.Join(unzipped, "runtime", "bin", "python3") ||
+		mp.Settings != filepath.Join(local, "Colab-yoga", "settings.json") {
+		t.Errorf("darwin portable paths %+v", mp)
 	}
 }
 

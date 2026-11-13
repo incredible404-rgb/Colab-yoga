@@ -10,28 +10,30 @@ exactly as long as it is used. LLM only: no video, image, ComfyUI or Gradio API 
 
 | Dir | Runs on | What |
 |---|---|---|
-| `console/` | this PC | `Colab-yoga.exe`, Go + MyGo native UI, tray icon |
-| `bridge/` | this PC | `colab_yoga_bridge.py`, run by the bundled Python: Google account, wake, URL and token recovery, release, the detached keeper |
+| `console/` | this PC / Mac | `Colab-yoga.exe` (Windows) / `Colab-yoga.app` (macOS), Go + MyGo native UI, tray / menu-bar icon |
+| `bridge/` | this PC / Mac | `colab_yoga_bridge.py`, run by the bundled Python: Google account, wake, URL and token recovery, release, the detached keeper |
 | `server/` | the Colab VM | `colab_yoga_server.py` (HTTP API + idle watchdog + MCP forwarder), `vm_boot.py` (what wake runs in the VM kernel) |
-| `tools/` | this PC | `install.py`: check, build, lay out the install dir, shortcuts, migration |
+| `tools/` | this PC / Mac | `install.py`: check, build, lay out the install dir, shortcuts, migration; `package.py`: build portable release zip |
 
-## Install layout (`%LOCALAPPDATA%\Programs\Colab-yoga`)
+## Install layout (`%LOCALAPPDATA%\Programs\Colab-yoga` on Windows, `~/Library/Application Support/Programs/Colab-yoga` on macOS)
 
 ```
-Colab-yoga.exe
-runtime\python.exe, runtime\pythonw.exe   python.org embeddable CPython 3.12.10 (python312._pth: python312.zip, ".", "..", "..\site-packages")
-site-packages\                           the packages pinned in bridge/requirements.txt (51 wheels)
-bridge\colab_yoga_bridge.py
-server\colab_yoga_server.py, server\vm_boot.py
-skills\colab-yoga\SKILL.md, references\api.md   release zip only: the agent skill, copy this folder into an agent's skills directory
-colab_kernel_runners.json                 not part of the repo or a release; exported here by colab-gpu-llm-service
+Colab-yoga.exe  (or Colab-yoga.app on macOS)
+runtime\python.exe, runtime\pythonw.exe   Windows: python.org embeddable CPython 3.12.10 (python312._pth: python312.zip, ".", "..", "..\site-packages")
+runtime/bin/python3                        macOS arm64: python-build-standalone CPython 3.12.10 (colab_yoga.pth: "../../../..", "../../../../site-packages")
+site-packages/                             the packages pinned in bridge/requirements.txt (51 wheels)
+bridge/colab_yoga_bridge.py
+server/colab_yoga_server.py, server/vm_boot.py
+skills/colab-yoga/SKILL.md, references/api.md   release zip only: the agent skill, copy this folder into an agent's skills directory
+colab_kernel_runners.json                 not part of the repo or a release; exported here or into ConfigDir by colab-gpu-llm-service
 ```
 
-The release zip is the same tree under a `Colab-yoga\` folder (plus README.txt, LICENSE, NOTICE,
-without `colab_kernel_runners.json`). The exe uses its own directory as the install when
-`bridge\colab_yoga_bridge.py` is next to it, so an unzipped package runs where it was unpacked;
-otherwise it falls back to `%LOCALAPPDATA%\Programs\Colab-yoga` (a dev build run from
-`console\dist`). Config and state stay in `%LOCALAPPDATA%\Colab-yoga` either way.
+The release zip is the same tree under a `Colab-yoga/` folder (plus README.txt, LICENSE, NOTICE,
+without `colab_kernel_runners.json`). The binary uses its own directory (or the folder holding
+`Colab-yoga.app` on macOS) as the install when `bridge/colab_yoga_bridge.py` is beside it, so an
+unzipped package runs where it was unpacked; otherwise it falls back to `<LocalDir>/Programs/Colab-yoga`
+(a dev build run from `console/dist`). Config and state stay in `%LOCALAPPDATA%\Colab-yoga` on
+Windows and `~/Library/Application Support/Colab-yoga` on macOS either way.
 
 Self-contained setup (`tools/install.py`, `tools/package.py`): nothing is copied from another
 application. `runtime\` is made from the CPython embeddable zip pinned by URL and SHA-256 in
