@@ -25,10 +25,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import platform
 import re
 import shutil
+import stat
 import sys
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -104,6 +108,49 @@ Source and docs / 源码与文档: https://github.com/incredible404-rgb/Colab-yo
 License / 许可: Apache License 2.0 (LICENSE, NOTICE)
 """
 
+README_MACOS = """\
+Colab-yoga {version} (macOS Apple Silicon arm64, no installer)
+
+Open Colab-yoga.app. Everything it needs is in this folder: Colab-yoga.app, runtime/ (Python),
+site-packages/, bridge/ and server/. Move or copy the whole folder anywhere; do not move
+Colab-yoga.app out of this folder on its own.
+
+- If macOS Gatekeeper blocks a browser-downloaded zip ("unidentified developer"), run:
+    xattr -cr Colab-yoga
+  on this unpacked folder, then open Colab-yoga.app again.
+- Settings and state are kept in ~/Library/Application Support/Colab-yoga (not in this folder).
+- First time: the window opens on a sign-in page; sign in with your Google account there.
+- To start models, run `python3 -X utf8 scripts/colab_kernel.py --all` in
+  colab-gpu-llm-service: it writes colab_kernel_runners.json (with your API keys) to
+  ~/Library/Application Support/Colab-yoga automatically, so this folder works from anywhere
+  without copying files by hand (a file next to Colab-yoga.app overrides it). This package ships
+  without it.
+- For an AI agent (Claude Code, Codex, ...): copy skills/colab-yoga/ (the whole folder) into
+  the agent's skills directory, e.g. ~/.claude/skills/ or ~/.agents/skills/.
+- Delete the folder to uninstall; delete ~/Library/Application Support/Colab-yoga to forget settings.
+
+Colab-yoga {version}（macOS Apple Silicon arm64，免安装）
+
+双击打开 Colab-yoga.app 即可，所需的 Python 运行时、依赖、bridge 和 server 都在这个文件夹里。
+整个文件夹可以放到任何位置，但不要把 Colab-yoga.app 单独拖出这个文件夹。
+
+- 若从浏览器下载后首次打开被 macOS Gatekeeper 拦截，在终端对解压出的文件夹执行一次：
+    xattr -cr Colab-yoga
+  再双击打开 Colab-yoga.app 即可。
+- 设置和状态保存在 ~/Library/Application Support/Colab-yoga，不在这个文件夹里。
+- 第一次使用：窗口打开就是登录页，在那里用 Google 账号登录。
+- 要启动模型，在 colab-gpu-llm-service 中运行 `python3 -X utf8 scripts/colab_kernel.py --all`：
+  它会自动把 colab_kernel_runners.json（含你的 API 密钥）写入 ~/Library/Application Support/Colab-yoga，
+  免安装包放在任意位置都能直接读取，无需手动拷文件（放在 Colab-yoga.app 旁的同名文件优先）。
+  本包不带这个文件。
+- 给 AI agent（Claude Code、Codex 等）用：把 skills/colab-yoga/ 整个文件夹复制到 agent 的
+  技能目录（如 ~/.claude/skills/ 或 ~/.agents/skills/）。
+- 卸载：删除这个文件夹；想连设置一起清掉，再删 ~/Library/Application Support/Colab-yoga。
+
+Source and docs / 源码与文档: https://github.com/incredible404-rgb/Colab-yoga
+License / 许可: Apache License 2.0 (LICENSE, NOTICE)
+"""
+
 
 def console_version(repo: Path) -> str:
     return json.loads((repo / "console" / "mygo.json").read_text(encoding="utf-8"))["version"]
@@ -125,8 +172,11 @@ def stage(paths: install.InstallPaths, exe: Path, embed_zip: str | None, version
     install.ensure_site_packages(paths, False)
     install.layout_install_dir(paths, exe, False, write_bytecode=False)
     target = paths.target_install
-    for name, text in (("README.txt", README.format(version=version)),):
-        (target / name).write_text(text, encoding="utf-8", newline="\r\n")
+    readme_tpl = README_MACOS if sys.platform == "darwin" else README
+    readme_nl = "\n" if sys.platform == "darwin" else "\r\n"
+    for name, text in (("README.txt", readme_tpl.format(version=version)),):
+        with open(target / name, "w", encoding="utf-8", newline=readme_nl) as f:
+            f.write(text)
     for name in ("LICENSE", "NOTICE"):
         shutil.copy2(paths.repo / name, target / name)
     skill_src = paths.repo / "skills" / "colab-yoga"
@@ -140,15 +190,42 @@ def stage(paths: install.InstallPaths, exe: Path, embed_zip: str | None, version
 
 
 def zip_tree(src: Path, dest: Path) -> list[str]:
-    """Zip src as ROOT_NAME/..., skipping caches and bytecode. Returns the entry names."""
+    """Zip src as ROOT_NAME/..., skipping caches and bytecode while preserving POSIX symlinks
+    and executable permissions. Returns the entry names."""
+    entries: list[Path] = []
+    for root, dirs, files in os.walk(src, followlinks=False):
+        root_p = Path(root)
+        kept_dirs: list[str] = []
+        for d in sorted(dirs):
+            if d == "__pycache__":
+                continue
+            dp = root_p / d
+            if dp.is_symlink():
+                entries.append(dp)
+            else:
+                kept_dirs.append(d)
+        dirs[:] = kept_dirs
+        for fn in sorted(files):
+            if fn.endswith((".pyc", ".pyo")):
+                continue
+            entries.append(root_p / fn)
+    entries.sort(key=lambda p: p.relative_to(src).as_posix())
+
     names: list[str] = []
     with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
-        for f in sorted(p for p in src.rglob("*") if p.is_file()):
-            rel = f.relative_to(src).as_posix()
+        for p in entries:
+            rel = p.relative_to(src).as_posix()
             if re.search(r"(^|/)__pycache__(/|$)", rel) or rel.endswith((".pyc", ".pyo")):
                 continue
             arc = f"{ROOT_NAME}/{rel}"
-            z.write(f, arc)
+            if p.is_symlink():
+                st = os.lstat(p)
+                zi = zipfile.ZipInfo(arc, time.localtime(st.st_mtime)[:6])
+                zi.create_system = 3  # Unix
+                zi.external_attr = (stat.S_IFLNK | 0o777) << 16
+                z.writestr(zi, os.readlink(p).encode("utf-8"), compress_type=zipfile.ZIP_STORED)
+            else:
+                z.write(p, arc)
             names.append(arc)
     return names
 
@@ -197,10 +274,12 @@ def main(argv=None) -> int:
             exe = Path(args.exe).resolve()
         else:
             exe = install.build_console(paths, False)
-        if not exe or not exe.is_file():
-            raise SystemExit("no Colab-yoga.exe to package (Go missing? pass --exe)")
+        if not exe or not install.app_binary_exists(exe):
+            want = "Colab-yoga.app" if sys.platform == "darwin" else "Colab-yoga.exe"
+            raise SystemExit(f"no {want} to package (Go missing? pass --exe)")
         staged = stage(paths, exe, args.embed_zip, version)
-        zip_path = out / f"Colab-yoga-{version}-windows-amd64.zip"
+        plat_tag = f"darwin-{platform.machine()}" if sys.platform == "darwin" else "windows-amd64"
+        zip_path = out / f"Colab-yoga-{version}-{plat_tag}.zip"
         if zip_path.exists():
             zip_path.unlink()
         names = zip_tree(staged, zip_path)
@@ -213,7 +292,8 @@ def main(argv=None) -> int:
             print("  " + p)
         return 1
     digest = install.sha256_of(zip_path)
-    (out / (zip_path.name + ".sha256")).write_text(f"{digest} *{zip_path.name}\n", encoding="ascii", newline="\n")  # LF, so `sha256sum -c` works on every OS
+    with open(out / (zip_path.name + ".sha256"), "w", encoding="ascii", newline="\n") as f:  # LF, so `sha256sum -c` works on every OS
+        f.write(f"{digest} *{zip_path.name}\n")
     print(f"package: {zip_path} ({zip_path.stat().st_size / (1024 * 1024):.1f} MB, {len(names)} files)")
     print(f"package: sha256 {digest}")
     print("package: audit OK (no runners/settings/keeper/token/credential files, no .pyc, no secret patterns)")

@@ -223,4 +223,4 @@ func (a *App) reloadCatalog() {
 }
 
 // noModelsHint is shown where the model list would be when there is none.
-const noModelsHint = "没有找到模型清单 colab_kernel_runners.json。在 colab-gpu-llm-service 里运行 python -X utf8 scripts/colab_kernel.py --all，会自动写入 %LOCALAPPDATA%\\Colab-yoga\\colab_kernel_runners.json（免安装包解压到任意目录都能自动识别；也可以放到 Colab-yoga.exe 旁边）。"
+const noModelsHint = "没有找到模型清单 colab_kernel_runners.json。在 colab-gpu-llm-service 里运行 python -X utf8 scripts/colab_kernel.py --all，会自动写入 %LOCALAPPDATA%\\Colab-yoga\\colab_kernel_runners.json（macOS 为 ~/Library/Application Support/Colab-yoga/colab_kernel_runners.json；免安装包解压到任意目录都能自动识别，也可以放到 Colab-yoga.exe / Colab-yoga.app 旁边）。"

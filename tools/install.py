@@ -23,25 +23,34 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import inspect
 import json
 import os
+import platform
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import urllib.request
 import zipfile
 from pathlib import Path
 
-# The runtime: python.org's Windows embeddable CPython. 3.12.10 is the last 3.12 release
-# that ships Windows binaries. The SHA-256 was computed from the download, whose MD5
-# matches the one python.org lists for it (fe8ef205f2e9c3ba44d0cf9954e1abd3).
+# Bundled CPython 3.12.10 runtimes (pinned by URL and SHA-256):
+# - Windows x64: python.org embeddable zip (MD5 fe8ef205f2e9c3ba44d0cf9954e1abd3)
+# - macOS arm64: python-build-standalone 20250529 install_only_stripped
 PYTHON_VERSION = "3.12.10"
 PYTHON_TAG = "312"
 PYTHON_EMBED_URL = f"https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-embed-amd64.zip"
 PYTHON_EMBED_SHA256 = "4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3"
+PYTHON_MACOS_ARM64_URL = (
+    "https://github.com/astral-sh/python-build-standalone/releases/download/20250529/"
+    f"cpython-{PYTHON_VERSION}%2B20250529-aarch64-apple-darwin-install_only_stripped.tar.gz"
+)
+PYTHON_MACOS_ARM64_SHA256 = "2579c9ffcbb0a745f1de3d645612c7466269eb9a23316a54ece49d50c1c9122f"
 
 # What may sit in the old EasyColab dir when it is only the compatibility layer that an
 # earlier Colab-yoga installer made there.
@@ -78,30 +87,59 @@ def desktop_folder() -> Path:
     return Path(found) if r.returncode == 0 and found else Path.home() / "Desktop"
 
 
+def bundled_python(install_dir: Path) -> Path:
+    return install_dir / "runtime" / ("python.exe" if sys.platform == "win32" else "bin/python3")
+
+
+def app_binary_exists(path: Path) -> bool:
+    return path.is_dir() if path.suffix == ".app" else path.is_file()
+
+
 class InstallPaths:
     def __init__(self, root: str | None = None, cache_dir: str | Path | None = None):
         self.repo = Path(__file__).resolve().parent.parent
         self.is_sandbox = root is not None
-        if root:
-            sandbox = Path(root).resolve()
-            self.local_appdata = sandbox / "AppData" / "Local"
-            self.target_install = sandbox / "Programs" / "Colab-yoga"
-            self.legacy_install = sandbox / "Programs" / "EasyColab"
-            self.target_config = self.local_appdata / "Colab-yoga"
-            self.legacy_config = self.local_appdata / "EasyColab"
-            self.start_menu = sandbox / "StartMenu"
-            self.desktop = sandbox / "Desktop"
+        if sys.platform == "darwin":
+            if root:
+                sandbox = Path(root).resolve()
+                self.local_appdata = sandbox / "Library" / "Application Support"
+                self.target_install = sandbox / "Programs" / "Colab-yoga"
+                self.legacy_install = sandbox / "Programs" / "EasyColab"
+                self.target_config = self.local_appdata / "Colab-yoga"
+                self.legacy_config = self.local_appdata / "EasyColab"
+                self.start_menu = sandbox / "Applications"
+                self.desktop = sandbox / "Desktop"
+            else:
+                base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "Library" / "Application Support")
+                self.local_appdata = Path(base)
+                self.target_install = self.local_appdata / "Programs" / "Colab-yoga"
+                self.legacy_install = self.local_appdata / "Programs" / "EasyColab"
+                self.target_config = self.local_appdata / "Colab-yoga"
+                self.legacy_config = self.local_appdata / "EasyColab"
+                self.start_menu = Path.home() / "Applications"
+                self.desktop = Path.home() / "Desktop"
+            self.target_exe = self.target_install / "Colab-yoga.app"
         else:
-            base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-            self.local_appdata = Path(base)
-            self.target_install = self.local_appdata / "Programs" / "Colab-yoga"
-            self.legacy_install = self.local_appdata / "Programs" / "EasyColab"
-            self.target_config = self.local_appdata / "Colab-yoga"
-            self.legacy_config = self.local_appdata / "EasyColab"
-            self.start_menu = Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
-            self.desktop = desktop_folder()
+            if root:
+                sandbox = Path(root).resolve()
+                self.local_appdata = sandbox / "AppData" / "Local"
+                self.target_install = sandbox / "Programs" / "Colab-yoga"
+                self.legacy_install = sandbox / "Programs" / "EasyColab"
+                self.target_config = self.local_appdata / "Colab-yoga"
+                self.legacy_config = self.local_appdata / "EasyColab"
+                self.start_menu = sandbox / "StartMenu"
+                self.desktop = sandbox / "Desktop"
+            else:
+                base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+                self.local_appdata = Path(base)
+                self.target_install = self.local_appdata / "Programs" / "Colab-yoga"
+                self.legacy_install = self.local_appdata / "Programs" / "EasyColab"
+                self.target_config = self.local_appdata / "Colab-yoga"
+                self.legacy_config = self.local_appdata / "EasyColab"
+                self.start_menu = Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
+                self.desktop = desktop_folder()
+            self.target_exe = self.target_install / "Colab-yoga.exe"
 
-        self.target_exe = self.target_install / "Colab-yoga.exe"
         self.console_src = self.repo / "console"
         # Downloaded archives are kept here, so a second install does not download again.
         self.cache_dir = Path(cache_dir) if cache_dir else self.target_config / "cache"
@@ -111,22 +149,55 @@ def find_go() -> str | None:
     found = shutil.which("go")
     if found:
         return found
-    local = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Go" / "bin" / "go.exe"
-    if local.is_file():
-        go_dir = str(local.parent)
-        if go_dir not in os.environ.get("PATH", ""):
-            os.environ["PATH"] = go_dir + os.pathsep + os.environ.get("PATH", "")
-        return str(local)
+    candidates = [Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Go" / "bin" / "go.exe"]
+    if sys.platform == "darwin":
+        candidates = [Path("/opt/homebrew/bin/go"), Path("/usr/local/bin/go")]
+    for local in candidates:
+        if local.is_file():
+            go_dir = str(local.parent)
+            if go_dir not in os.environ.get("PATH", ""):
+                os.environ["PATH"] = go_dir + os.pathsep + os.environ.get("PATH", "")
+            return str(local)
     return None
 
 
-def host_pythons() -> list[list[str]]:
-    """Command lines of Pythons on this PC that may have pip and venv, best first."""
-    out: list[list[str]] = [[sys.executable]]
-    if shutil.which("py"):
-        out.append(["py", "-3"])
-    if shutil.which("python"):
-        out.append(["python"])
+def go_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env.setdefault("GOTOOLCHAIN", "auto")
+    return env
+
+
+def host_pythons(paths: InstallPaths | None = None) -> list[list[str]]:
+    """Command lines of Pythons on this machine that may have pip and venv, best first."""
+    out: list[list[str]] = []
+    if paths is not None:
+        bundled = bundled_python(paths.target_install)
+        if bundled.is_file():
+            out.append([str(bundled)])
+    if sys.version_info >= (3, 10):
+        out.append([sys.executable])
+    if sys.platform == "win32":
+        if shutil.which("py"):
+            out.append(["py", "-3"])
+        if shutil.which("python"):
+            out.append(["python"])
+    else:
+        for cand in ("/opt/homebrew/bin/python3", "/usr/local/bin/python3", shutil.which("python3") or ""):
+            if cand and Path(cand).is_file() and [cand] not in out:
+                out.append([cand])
+        if shutil.which("uv"):
+            try:
+                r = subprocess.run(
+                    ["uv", "python", "find", ">=3.10"],
+                    capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=15,
+                )
+                found = r.stdout.strip()
+                if r.returncode == 0 and found and Path(found).is_file() and [found] not in out:
+                    out.append([found])
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    if [sys.executable] not in out:
+        out.append([sys.executable])
     return out
 
 
@@ -138,25 +209,32 @@ def python_can(cmd: list[str], code: str) -> bool:
     return r.returncode == 0
 
 
-def find_pip_python() -> list[str] | None:
-    for cmd in host_pythons():
+def find_pip_python(paths: InstallPaths | None = None) -> list[str] | None:
+    candidates = host_pythons(paths)
+    for cmd in candidates:
+        if python_can(cmd, "import sys, pip; assert sys.version_info >= (3, 10)"):
+            return cmd
+    for cmd in candidates:
         if python_can(cmd, "import pip"):
             return cmd
     return None
 
 
 def server_test_python(paths: InstallPaths) -> str | None:
-    """A Python with fastapi for server/test_server.py. The bundled runtime has neither
-    fastapi nor pip, so a dev venv is made once under the config dir from a host Python
-    (COLAB_YOGA_DEV_PYTHON, else this one, else the `py` launcher)."""
+    """A Python with fastapi for server/test_server.py. The Windows embeddable runtime has
+    neither fastapi nor pip, so a dev venv is made once under the config dir from a Python
+    with venv + ensurepip (COLAB_YOGA_DEV_PYTHON, else bundled/host Python 3.10+)."""
     venv = paths.target_config / "dev-venv"
-    vpy = venv / "Scripts" / "python.exe"
+    vpy = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
     reqs = paths.repo / "server" / "requirements-dev.txt"
     quiet = dict(stdin=subprocess.DEVNULL, timeout=600)
     if not vpy.is_file():
         base = os.environ.get("COLAB_YOGA_DEV_PYTHON")
-        candidates = [[base]] if base else host_pythons()
-        cmd = next((c for c in candidates if python_can(c, "import venv, ensurepip")), None)
+        candidates = [[base]] if base else host_pythons(paths)
+        cmd = next(
+            (c for c in candidates if python_can(c, "import sys, venv, ensurepip; assert sys.version_info >= (3, 10)")),
+            None,
+        )
         if not cmd:
             return None
         print(f"Creating the server-test venv at {venv} ...")
@@ -172,7 +250,7 @@ def server_test_python(paths: InstallPaths) -> str | None:
 
 def find_python(paths: InstallPaths) -> str:
     """The bundled runtime when it exists (it is made first), else the running Python."""
-    bundled = paths.target_install / "runtime" / "python.exe"
+    bundled = bundled_python(paths.target_install)
     return str(bundled) if bundled.is_file() else sys.executable
 
 
@@ -224,39 +302,88 @@ def safe_extract(zip_path: Path, dest: Path) -> None:
         z.extractall(dest)
 
 
+def safe_extract_tar(tar_path: Path, dest: Path) -> None:
+    root = str(dest.resolve())
+    prefix = root + os.sep
+    with tarfile.open(tar_path, "r:gz") as t:
+        for m in t.getmembers():
+            if m.isdev():
+                raise RuntimeError(f"unsafe device entry in {tar_path.name}: {m.name}")
+            norm = os.path.normpath(os.path.join(root, m.name))
+            if norm != root and not norm.startswith(prefix):
+                raise RuntimeError(f"unsafe path in {tar_path.name}: {m.name}")
+            if m.issym() or m.islnk():
+                link_base = root if m.islnk() else os.path.dirname(norm)
+                link_target = os.path.normpath(os.path.join(link_base, m.linkname))
+                if link_target != root and not link_target.startswith(prefix):
+                    raise RuntimeError(f"unsafe link in {tar_path.name}: {m.name} -> {m.linkname}")
+        if "filter" in inspect.signature(t.extractall).parameters:
+            t.extractall(dest, filter="tar")
+        else:
+            t.extractall(dest)
+
+
+def _runtime_spec() -> tuple[str, str, str]:
+    """(url, sha256, local_filename) for the current platform's standalone CPython."""
+    if sys.platform == "win32":
+        return PYTHON_EMBED_URL, PYTHON_EMBED_SHA256, PYTHON_EMBED_URL.rsplit("/", 1)[1]
+    if sys.platform == "darwin":
+        if platform.machine() != "arm64":
+            raise SystemExit(
+                f"Unsupported macOS architecture '{platform.machine()}': Colab-yoga pins arm64 (Apple Silicon) wheels."
+            )
+        fname = urllib.request.unquote(PYTHON_MACOS_ARM64_URL.rsplit("/", 1)[1])
+        return PYTHON_MACOS_ARM64_URL, PYTHON_MACOS_ARM64_SHA256, fname
+    raise SystemExit(f"Unsupported platform '{sys.platform}': Colab-yoga supports Windows x64 and macOS arm64.")
+
+
 def ensure_runtime(paths: InstallPaths, dry_run: bool, embed_zip: str | None = None) -> bool:
-    """Make <install>\\runtime from the pinned embeddable CPython unless it is there already.
+    """Make <install>/runtime from the pinned standalone CPython unless it is there already.
     Returns True when it had to be created."""
     runtime = paths.target_install / "runtime"
-    if (runtime / "python.exe").is_file():
+    if bundled_python(paths.target_install).is_file():
         return False
+    url, expected_sha, archive_name = _runtime_spec()
     if dry_run:
-        print(f"[dry-run] runtime: would download CPython {PYTHON_VERSION} embeddable into {runtime}")
+        print(f"[dry-run] runtime: would download CPython {PYTHON_VERSION} standalone into {runtime}")
         return True
     if embed_zip:
         archive = Path(embed_zip)
         got = sha256_of(archive)
-        if got != PYTHON_EMBED_SHA256:
-            raise RuntimeError(f"{archive} is not the pinned {PYTHON_EMBED_URL.rsplit('/', 1)[1]}: SHA-256 {got}")
+        if got != expected_sha:
+            raise RuntimeError(f"{archive} is not the pinned {archive_name}: SHA-256 {got}")
     else:
-        archive = paths.cache_dir / PYTHON_EMBED_URL.rsplit("/", 1)[1]
-        if not (archive.is_file() and sha256_of(archive) == PYTHON_EMBED_SHA256):
-            download_verified(PYTHON_EMBED_URL, PYTHON_EMBED_SHA256, archive)
+        archive = paths.cache_dir / archive_name
+        if not (archive.is_file() and sha256_of(archive) == expected_sha):
+            download_verified(url, expected_sha, archive)
     paths.target_install.mkdir(parents=True, exist_ok=True)
     staging = paths.target_install / "runtime.new"
     if staging.exists():
         _force_rmtree(staging)
     staging.mkdir()
-    safe_extract(archive, staging)
-    # The embeddable zip ships its ._pth with "import site" commented out. Keep the install
-    # dir ("..") and site-packages on the path; site stays on so .pth files are processed.
-    (staging / f"python{PYTHON_TAG}._pth").write_text(
-        f"python{PYTHON_TAG}.zip\n.\n..\n..\\site-packages\nimport site\n", encoding="ascii"
-    )
+    if sys.platform == "win32":
+        safe_extract(archive, staging)
+        # The embeddable zip ships its ._pth with "import site" commented out. Keep the install
+        # dir ("..") and site-packages on the path; site stays on so .pth files are processed.
+        (staging / f"python{PYTHON_TAG}._pth").write_text(
+            f"python{PYTHON_TAG}.zip\n.\n..\n..\\site-packages\nimport site\n", encoding="ascii"
+        )
+    else:
+        safe_extract_tar(archive, staging)
+        inner = staging / "python"
+        if inner.is_dir():
+            for child in list(inner.iterdir()):
+                shutil.move(str(child), str(staging / child.name))
+            inner.rmdir()
+        # Relative .pth inside runtime/lib/python3.12/site-packages puts <install> and
+        # <install>/site-packages on sys.path regardless of where the folder is moved.
+        rt_sp = staging / "lib" / f"python{PYTHON_TAG[0]}.{PYTHON_TAG[1:]}" / "site-packages"
+        rt_sp.mkdir(parents=True, exist_ok=True)
+        (rt_sp / "colab_yoga.pth").write_text("../../../..\n../../../../site-packages\n", encoding="ascii")
     if runtime.exists():
-        _force_rmtree(runtime)  # an incomplete earlier attempt: it has no python.exe
+        _force_rmtree(runtime)  # an incomplete earlier attempt
     os.replace(staging, runtime)
-    print(f"runtime: CPython {PYTHON_VERSION} embeddable ready at {runtime}")
+    print(f"runtime: CPython {PYTHON_VERSION} standalone ready at {runtime}")
     return True
 
 
@@ -298,20 +425,32 @@ def ensure_site_packages(paths: InstallPaths, dry_run: bool, before_replace=None
     if dry_run:
         print(f"[dry-run] site-packages: would install {len(want)} pinned packages into {sp}")
         return True
-    pip_py = find_pip_python()
+    pip_py = find_pip_python(paths)
     if pip_py is None:
         raise RuntimeError(
             "site-packages needs installing but no Python with pip was found. Run this script "
-            "with a Python 3.10+ that has pip (e.g. 'py -3 tools/install.py') or put one on PATH."
+            "with a Python 3.10+ that has pip (e.g. 'python3 tools/install.py') or put one on PATH."
         )
     staging = paths.target_install / "site-packages.new"
     if staging.exists():
         _force_rmtree(staging)
     paths.target_install.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "win32":
+        platform_args = ["--platform", "win_amd64"]
+    elif sys.platform == "darwin" and platform.machine() == "arm64":
+        platform_args = [
+            "--platform", "macosx_11_0_arm64",
+            "--platform", "macosx_10_15_universal2",
+            "--platform", "macosx_10_13_universal2",
+            "--platform", "macosx_10_9_universal2",
+            "--implementation", "cp",
+        ]
+    else:
+        raise SystemExit(f"Unsupported platform/arch: {sys.platform}/{platform.machine()}")
     cmd = pip_py + [
         "-m", "pip", "install", "--disable-pip-version-check", "--no-compile",
         "--target", str(staging),
-        "--platform", "win_amd64", "--python-version", f"{PYTHON_TAG[0]}.{PYTHON_TAG[1:]}",
+        *platform_args, "--python-version", f"{PYTHON_TAG[0]}.{PYTHON_TAG[1:]}",
         "--only-binary=:all:", "--no-deps", "--require-hashes", "-r", str(reqs),
     ]
     print(f"site-packages: installing {len(want)} pinned packages with {' '.join(pip_py)} -m pip ...")
@@ -362,12 +501,13 @@ def check_go(console_dir: Path) -> bool:
     if not go:
         print("console check: skipped (Go not found)")
         return True
-    res_vet = subprocess.run([go, "vet", "./..."], cwd=console_dir)
+    env = go_env()
+    res_vet = subprocess.run([go, "vet", "./..."], cwd=console_dir, env=env)
     if res_vet.returncode != 0:
         print("console: go vet FAILED")
         return False
     print("console: go vet OK")
-    res_test = subprocess.run([go, "test", "./..."], cwd=console_dir)
+    res_test = subprocess.run([go, "test", "./..."], cwd=console_dir, env=env)
     if res_test.returncode != 0:
         print("console: go test FAILED")
         return False
@@ -424,14 +564,25 @@ def build_console(paths: InstallPaths, dry_run: bool) -> Path | None:
     if not go:
         print("console: skipped build (Go not found)")
         return None
+    skip_flag = "-skip-dmg" if sys.platform == "darwin" else "-skip-installer"
     if dry_run:
-        print("console: [dry-run] would run 'go tool mygo build -skip-installer'")
+        print(f"console: [dry-run] would run 'go tool mygo build {skip_flag}'")
         return None
-    cmd = [go, "tool", "mygo", "build", "-skip-installer"]
+    cmd = [go, "tool", "mygo", "build", skip_flag]
     print(f"console: building via '{' '.join(cmd)}'...")
-    res = subprocess.run(cmd, cwd=paths.console_src)
+    res = subprocess.run(cmd, cwd=paths.console_src, env=go_env())
     if res.returncode != 0:
         raise RuntimeError("console: mygo build failed")
+    if sys.platform == "darwin":
+        goarch = "arm64" if platform.machine() == "arm64" else "amd64"
+        dist_dir = paths.console_src / "dist" / f"darwin-{goarch}"
+        apps = [p for p in dist_dir.glob("*.app") if p.is_dir()]
+        if not apps:
+            raise RuntimeError(f"console: no .app found in {dist_dir}")
+        apps.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        built_app = apps[0]
+        print(f"console: successfully built {built_app.name} ({get_dir_size_mb(built_app):.1f} MB)")
+        return built_app
     dist_dir = paths.console_src / "dist" / "windows-amd64"
     exes = list(dist_dir.glob("*.exe"))
     if not exes:
@@ -472,7 +623,7 @@ def get_dir_size_mb(path: Path) -> float:
 
 def verify_bridge(install_dir: Path, local_appdata: Path | None, write_bytecode: bool = True) -> str:
     """Import the bridge with the install's own runtime; returns its one-line OK message."""
-    py = install_dir / "runtime" / "python.exe"
+    py = bundled_python(install_dir)
     bridge_dir = install_dir / "bridge"
     flags = ["-X", "utf8"] + ([] if write_bytecode else ["-B"])
     code = (
@@ -496,11 +647,20 @@ def layout_install_dir(paths: InstallPaths, built_exe: Path | None, dry_run: boo
     if not dry_run:
         paths.target_install.mkdir(parents=True, exist_ok=True)
 
-    # 1. Colab-yoga.exe
-    if built_exe and built_exe.is_file():
+    # 1. Colab-yoga.exe / Colab-yoga.app
+    if built_exe and built_exe.is_dir():
+        if dry_run:
+            print(f"[dry-run] copytree: {built_exe} -> {paths.target_exe}")
+        else:
+            if paths.target_exe.is_symlink():
+                paths.target_exe.unlink()
+            elif paths.target_exe.exists():
+                _force_rmtree(paths.target_exe)
+            shutil.copytree(built_exe, paths.target_exe, symlinks=True)
+    elif built_exe and built_exe.is_file():
         copy_file_if_changed(built_exe, paths.target_exe, dry_run)
-    elif not paths.target_exe.is_file():
-        print("warning: Colab-yoga.exe not present and not built")
+    elif not app_binary_exists(paths.target_exe):
+        print(f"warning: {paths.target_exe.name} not present and not built")
 
     # 2. bridge/ and 3. server/ (*.py except tests)
     for sub in ("bridge", "server"):
@@ -626,7 +786,7 @@ def retire_legacy(paths: InstallPaths, dry_run: bool):
         print(f"legacy: {legacy} is not a Colab-yoga compatibility layer ({why}); left in place. "
               "Nothing uses it any more; delete it yourself if you do not need EasyColab.")
         return
-    new_ready = (paths.target_install / "runtime" / "python.exe").is_file() and \
+    new_ready = bundled_python(paths.target_install).is_file() and \
         (paths.target_install / "site-packages" / "colab_cli").is_dir() and \
         (paths.target_install / "bridge" / "colab_yoga_bridge.py").is_file()
     if not new_ready and not dry_run:
@@ -640,7 +800,7 @@ def retire_legacy(paths: InstallPaths, dry_run: bool):
     for link in (legacy / "repo", legacy / "_internal" / "runtime", legacy / "_internal" / "site-packages"):
         if os.path.lexists(link):
             remove_link(link)
-    if not (paths.target_install / "runtime" / "python.exe").is_file() or \
+    if not bundled_python(paths.target_install).is_file() or \
             not (paths.target_install / "site-packages" / "colab_cli").is_dir():
         raise RuntimeError("the install lost its runtime or packages while unlinking; stopping")
     for root, dirs, files in os.walk(legacy):  # nothing left may be a link
@@ -656,7 +816,21 @@ def retire_legacy(paths: InstallPaths, dry_run: bool):
 # ─── Step (f): Shortcuts ─────────────────────────────────────────────────────────
 
 def setup_shortcuts(paths: InstallPaths, dry_run: bool):
-    if not paths.target_exe.is_file() and not dry_run:
+    if not app_binary_exists(paths.target_exe) and not dry_run:
+        return
+    if sys.platform == "darwin":
+        link = paths.start_menu / "Colab-yoga.app"
+        if dry_run:
+            print(f"[dry-run] shortcut: symlink {link} -> {paths.target_exe}")
+            return
+        if link.exists() and not link.is_symlink():
+            print(f"shortcut: {link} already exists as a real app bundle; left in place")
+            return
+        paths.start_menu.mkdir(parents=True, exist_ok=True)
+        if link.is_symlink():
+            link.unlink()
+        os.symlink(paths.target_exe, link)
+        print(f"shortcut: linked {link} -> {paths.target_exe}")
         return
     ps_create = """
 param(
@@ -731,13 +905,28 @@ def stop_keeper(paths: InstallPaths, dry_run: bool):
         if dry_run:
             print(f"[dry-run] keeper: would stop PID {pid}")
             return
-        subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+        else:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
         st.update(exit_reason="install_restart", ended=time.time())
         keeper_json.write_text(json.dumps(st), encoding="utf-8")
         print(f"keeper: stopped PID {pid} (bridge updated; console will respawn)")
 
 
 def get_gui_pids(exe_names: list[str]) -> list[int]:
+    if sys.platform != "win32":
+        r = subprocess.run(
+            ["pgrep", "-f", "Colab-yoga.app/Contents/MacOS/Colab-yoga"],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        )
+        if r.returncode != 0:
+            return []
+        me = os.getpid()
+        return [int(x) for x in r.stdout.split() if x.isdigit() and int(x) != me]
     pids = []
     for name in exe_names:
         ps = f"Get-CimInstance Win32_Process -Filter \"Name='{name}'\" | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
@@ -761,20 +950,32 @@ CONSOLE_EXES = ["Colab-yoga.exe", "EasyColab.exe"]
 
 
 def close_consoles(paths: InstallPaths, no_restart: bool, dry_run: bool) -> bool:
-    """Close running consoles before their exe is replaced (Windows locks a running exe).
-    WM_CLOSE first so the window saves its bounds; the app then sits in the tray, so it is
-    ended after a moment. The keeper is a separate process and keeps the GPU alive."""
+    """Close running consoles before their binary is replaced. The keeper is a separate
+    process and keeps the GPU alive."""
     if no_restart or dry_run or paths.is_sandbox:
         return False
     running_pids = get_gui_pids(CONSOLE_EXES)
     if not running_pids:
         return False
     print(f"console: closing running instances (PIDs: {running_pids})...")
-    for pid in running_pids:
-        subprocess.run(["taskkill", "/PID", str(pid)], capture_output=True)
-    time.sleep(2)
-    for pid in running_pids:
-        subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+    if sys.platform == "win32":
+        for pid in running_pids:
+            subprocess.run(["taskkill", "/PID", str(pid)], capture_output=True)
+        time.sleep(2)
+        for pid in running_pids:
+            subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+    else:
+        for pid in running_pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+        time.sleep(2)
+        for pid in get_gui_pids(CONSOLE_EXES):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
     deadline = time.time() + 10
     while get_gui_pids(CONSOLE_EXES) and time.time() < deadline:
         time.sleep(0.5)
@@ -782,10 +983,16 @@ def close_consoles(paths: InstallPaths, no_restart: bool, dry_run: bool) -> bool
 
 
 def relaunch_console(paths: InstallPaths, was_running: bool):
-    if was_running and paths.target_exe.is_file():
+    if was_running and app_binary_exists(paths.target_exe):
         print(f"console: launching {paths.target_exe.name}...")
-        flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        subprocess.Popen([str(paths.target_exe)], cwd=str(paths.target_install), creationflags=flags, close_fds=True)
+        if sys.platform == "darwin":
+            subprocess.Popen(
+                ["open", "-a", str(paths.target_exe)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
+            )
+        else:
+            flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            subprocess.Popen([str(paths.target_exe)], cwd=str(paths.target_install), creationflags=flags, close_fds=True)
 
 
 # ─── Main ────────────────────────────────────────────────────────────────────────

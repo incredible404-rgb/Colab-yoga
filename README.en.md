@@ -26,7 +26,7 @@ The model runtime itself (`colab_kernel` startup script, model catalog, Chinese 
 
 | Directory | Runs on | Role |
 |---|---|---|
-| `console/` | Local machine | `Colab-yoga.exe`: native UI built with Go + [MyGo](https://github.com/egoist/mygo), resident in the system tray |
+| `console/` | Local machine | `Colab-yoga.exe` (Windows) / `Colab-yoga.app` (macOS): native UI built with Go + [MyGo](https://github.com/egoist/mygo), resident in the system tray / menu bar |
 | `bridge/` | Local machine | `colab_yoga_bridge.py`: Google account auth, wake, endpoint discovery, release, and background keepalive (`keeper`) |
 | `server/` | Colab VM | `colab_yoga_server.py`: HTTP API, idle watchdog, and MCP forwarding; `vm_boot.py`: executed inside the VM kernel on wake |
 | `tools/` | Local machine | `install.py`: checks, build, runtime and dependency setup, installation, shortcuts, and config migration; `package.py`: builds the portable release zip |
@@ -35,40 +35,44 @@ Conventions shared across components (directory layout, APIs, state fields, and 
 
 ## Getting started (first model in 4 steps)
 
-1. **Sign in**: unzip the portable package, run `Colab-yoga.exe`, and sign in with your Google account.
+1. **Sign in**: unzip the portable package, run `Colab-yoga.exe` (Windows) or open `Colab-yoga.app` (macOS), and sign in with your Google account.
 2. **Set up Tailscale**: configure a Tailscale Service once, as described in colab-gpu-llm-service; web chat, the API and MCP all use that address.
-3. **Export the model list**: clone [colab-gpu-llm-service](https://github.com/incredible404-rgb/colab-gpu-llm-service), fill in the 4 required fields of `.secrets.json` (`api_key`, `ts_client_id`, `ts_client_secret`, `tailnet_fqdn`), and run `python -X utf8 scripts/colab_kernel.py --all`. It writes `%LOCALAPPDATA%\Colab-yoga\colab_kernel_runners.json` automatically, and the console lists the models right away.
+3. **Export the model list**: clone [colab-gpu-llm-service](https://github.com/incredible404-rgb/colab-gpu-llm-service), fill in the 4 required fields of `.secrets.json` (`api_key`, `ts_client_id`, `ts_client_secret`, `tailnet_fqdn`), and run `python -X utf8 scripts/colab_kernel.py --all` (`python3` on macOS). It writes `%LOCALAPPDATA%\Colab-yoga\colab_kernel_runners.json` (`~/Library/Application Support/Colab-yoga/colab_kernel_runners.json` on macOS) automatically, and the console lists the models right away.
 4. **Use it**: back in the console, click **Wake G4**, load a model, then chat on the web or call the `/v1` API.
 
 Without colab-gpu-llm-service, Colab-yoga still signs in, wakes, keeps alive and releases instances on its own; there are just no models to load.
 
 ## Deployment
 
-Two ways, and neither depends on another application's install directory: Colab-yoga brings its own Python runtime and dependencies.
+Two ways, and neither depends on another application's install directory: Colab-yoga brings its own Python runtime and dependencies. Supports **Windows 10/11 x64** and **macOS Apple Silicon (`darwin-arm64`)**.
 
 ### Option 1: download the portable package
 
-1. Download `Colab-yoga-<version>-windows-amd64.zip` (with its `.sha256` next to it) from [Releases](https://github.com/incredible404-rgb/Colab-yoga/releases).
-2. Unzip it anywhere and run `Colab-yoga.exe`. No separate Python install is needed. The whole folder can be moved as a unit; do not take the exe out of it.
-3. Settings and state live in `%LOCALAPPDATA%\Colab-yoga`, not in the unzipped folder. The package creates no shortcuts and writes nothing to the registry; delete the folder to uninstall.
-4. The model list `colab_kernel_runners.json` (exported by colab-gpu-llm-service's `colab_kernel.py`, contains API keys) and the local MCP config `local_mcp_bridge.json` are both written to `%LOCALAPPDATA%\Colab-yoga` by default, and the console reads them from there, so the package works from any folder with no files to copy by hand; a file of the same name next to `Colab-yoga.exe` takes precedence. The package ships neither; without a model list the model library is empty and says how to export one.
+1. Download `Colab-yoga-<version>-windows-amd64.zip` or `Colab-yoga-<version>-darwin-arm64.zip` (with its `.sha256` next to it) from [Releases](https://github.com/incredible404-rgb/Colab-yoga/releases).
+2. Unzip it anywhere and run `Colab-yoga.exe` (Windows) or open `Colab-yoga.app` (macOS; if Gatekeeper blocks a browser download, run `xattr -cr Colab-yoga` once). No separate Python install is needed. The whole folder can be moved as a unit; do not take `Colab-yoga.exe` / `Colab-yoga.app` out of it on its own.
+3. Settings and state live in `%LOCALAPPDATA%\Colab-yoga` (Windows) or `~/Library/Application Support/Colab-yoga` (macOS), not in the unzipped folder. The package creates no shortcuts and writes nothing to the registry; delete the folder to uninstall.
+4. The model list `colab_kernel_runners.json` (exported by colab-gpu-llm-service's `colab_kernel.py`, contains API keys) and the local MCP config `local_mcp_bridge.json` are both written to that config directory by default, and the console reads them from there, so the package works from any folder with no files to copy by hand; a file of the same name next to the app binary takes precedence. The package ships neither; without a model list the model library is empty and says how to export one.
 
 ### Option 2: install from source
 
-Prerequisites: Windows 10/11 x64; [Go](https://go.dev/dl/) 1.27+; [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows) (`pwsh`, used for shortcuts and process handling); and [python.org](https://www.python.org/downloads/windows/) Python 3.10 or newer with pip (it only runs the installer and pip; the 3.12 the console runs on is downloaded by the installer).
+- **Windows 10/11 x64**: [Go](https://go.dev/dl/) 1.27+; [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows) (`pwsh`, used for shortcuts and process handling); and [python.org](https://www.python.org/downloads/windows/) Python 3.10+ with pip.
+- **macOS Apple Silicon (`arm64`)**: [Go](https://go.dev/dl/) 1.27+ (or `GOTOOLCHAIN=auto`) and `python3` (the bundled standalone CPython 3.12.10 brings its own `pip`, verified by SHA-256).
 
 ```bash
 git clone https://github.com/incredible404-rgb/Colab-yoga.git
 cd Colab-yoga
+# Windows:
 py -3 tools/install.py
+# macOS:
+python3 tools/install.py
 ```
 
 That one command:
 
-- runs the checks (syntax, `go vet`, Go tests, and the unit tests for bridge and server), then builds `Colab-yoga.exe`;
-- downloads python.org's Windows embeddable CPython 3.12.10 into `%LOCALAPPDATA%\Programs\Colab-yoga\runtime` and verifies its SHA-256; an existing `runtime\` is not downloaded again (offline, point `--embed-zip <file>` at the same archive);
-- installs the dependencies into `site-packages\` with the host Python's pip, from [bridge/requirements.txt](bridge/requirements.txt): pinned versions, every wheel hash-checked, binary wheels only, targeting CPython 3.12 / win_amd64, so the host Python need not be 3.12 (uv is not used);
-- places `bridge\` and `server\`, creates Start menu and desktop shortcuts, and smoke-tests the bridge with the bundled runtime.
+- runs the checks (syntax, `go vet`, Go tests, and the unit tests for bridge and server), then builds `Colab-yoga.exe` / `Colab-yoga.app`;
+- downloads a pinned standalone CPython 3.12.10 into `<install>/runtime` (`%LOCALAPPDATA%\Programs\Colab-yoga\runtime` on Windows, `~/Library/Application Support/Programs/Colab-yoga/runtime` on macOS) and verifies its SHA-256; an existing `runtime/` is not downloaded again (offline, point `--embed-zip <file>` at the same archive);
+- installs the dependencies into `site-packages/` from [bridge/requirements.txt](bridge/requirements.txt): pinned versions, every wheel hash-checked, binary wheels only, targeting CPython 3.12 (`win_amd64` or `macosx_arm64`);
+- places `bridge/` and `server/`, creates shortcuts (Start menu + desktop `.lnk` on Windows, `~/Applications/Colab-yoga.app` symlink on macOS), and smoke-tests the bridge with the bundled runtime.
 
 Running it again is an upgrade: dependencies are not reinstalled when their versions match, and a running console is closed first and reopened afterwards. Add `--dry-run` to see what it would do, or `--root <dir>` to try it elsewhere.
 
@@ -77,10 +81,13 @@ When moving over from the earlier EasyColab, the installer once copies the old `
 ### Build the portable package yourself
 
 ```bash
+# Windows:
 py -3 tools/package.py --out <a directory outside the repo>
+# macOS:
+python3 tools/package.py --out <a directory outside the repo>
 ```
 
-It stages the package the same way an install does, in a temporary directory, zips it to `Colab-yoga-<version>-windows-amd64.zip` (plus a `.sha256`), and audits the result: no `colab_kernel_runners.json`, `settings.json`, `keeper.json`, token or credential files, `.pyc` files, or key-shaped strings. If anything turns up, the zip is deleted and the build fails.
+It stages the package the same way an install does, in a temporary directory, zips it to `Colab-yoga-<version>-windows-amd64.zip` or `Colab-yoga-<version>-darwin-arm64.zip` (plus a `.sha256`), and audits the result: no `colab_kernel_runners.json`, `settings.json`, `keeper.json`, token or credential files, `.pyc` files, or key-shaped strings. If anything turns up, the zip is deleted and the build fails.
 
 ## Local MCP bridge
 

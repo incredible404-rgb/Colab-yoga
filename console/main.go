@@ -28,6 +28,7 @@ func main() {
 	app.live = true
 	writeInstallAnchor(app.paths) // only the real start: tests build Paths of their own
 	mygo.App.OnSecondInstance(func([]string, string) { app.showWindow() })
+	mygo.App.OnActivate(func(bool) { app.showWindow() })
 	// Registering a listener keeps the app running in the tray when the window closes.
 	mygo.App.OnWindowAllClosed(func() {})
 	mygo.App.WhenReady(func() {

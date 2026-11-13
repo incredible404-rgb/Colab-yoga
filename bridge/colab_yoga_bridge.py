@@ -17,6 +17,7 @@ Supports subcommands:
                    redeploying
   - keeper       : Detached heartbeat daemon that keeps the Colab runtime alive while active
 """
+import errno
 import os
 import re
 import secrets
@@ -530,9 +531,16 @@ def _allocate_fresh_session(session_name: str, gpu_type: str) -> SessionState:
     return s
 
 
-def _local_app_data(env=None) -> str:
+def _local_app_data(env=None, home: str = None) -> str:
     env = os.environ if env is None else env
-    return env.get("LOCALAPPDATA") or env.get("APPDATA") or os.path.expanduser("~/AppData/Local")
+    if env.get("LOCALAPPDATA") or env.get("APPDATA"):
+        return env.get("LOCALAPPDATA") or env.get("APPDATA")
+    home = os.path.expanduser("~") if home is None else home
+    if sys.platform == "darwin":
+        return os.path.join(home, "Library", "Application Support")
+    if sys.platform != "win32":
+        return env.get("XDG_DATA_HOME") or os.path.join(home, ".local", "share")
+    return os.path.join(home, "AppData", "Local")
 
 
 def resolve_runners_path() -> str:
@@ -974,7 +982,7 @@ print('EC_KEEPER:' + json.dumps(_o))
 
 
 def _colab_yoga_config_dir() -> str:
-    base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or os.path.expanduser("~/AppData/Local")
+    base = _local_app_data()
     path = os.path.join(base, "Colab-yoga")
     os.makedirs(path, exist_ok=True)
     return path
@@ -1029,8 +1037,8 @@ def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
         return True
-    except OSError:
-        return False
+    except OSError as e:
+        return e.errno == errno.EPERM
 
 
 def keeper_status() -> dict:
@@ -1375,10 +1383,11 @@ def cmd_keeper():
 
 
 def _keeper_python() -> str:
-    """pythonw.exe of the bundled runtime (no console window), else the interpreter in use."""
+    """Bundled runtime's Python (pythonw.exe on Windows, bin/python3 on POSIX), else sys.executable."""
     install_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     for cand in (
         os.path.join(install_dir, "runtime", "pythonw.exe"),
+        os.path.join(install_dir, "runtime", "bin", "python3"),
         os.path.join(os.path.dirname(sys.executable), "pythonw.exe"),
     ):
         if os.path.isfile(cand):
@@ -1476,7 +1485,7 @@ def local_mcp_script_path(install_dir: str = None, env=None, home: str = None):
     env = os.environ if env is None else env
     home = os.path.expanduser("~") if home is None else home
     candidates = [env.get("COLAB_LOCAL_MCP_SCRIPT") or ""]
-    local_app_data = env.get("LOCALAPPDATA") or env.get("APPDATA") or os.path.join(home, "AppData", "Local")
+    local_app_data = _local_app_data(env=env, home=home)
     config_dirs = []
     if env.get("COLAB_YOGA_DIR"):
         config_dirs.append(env["COLAB_YOGA_DIR"])
@@ -1498,9 +1507,15 @@ def local_mcp_script_path(install_dir: str = None, env=None, home: str = None):
 
 
 def _local_mcp_python() -> str:
-    """The bundled runtime's python.exe, else the interpreter in use."""
-    cand = os.path.join(_install_dir(), "runtime", "python.exe")
-    return cand if os.path.isfile(cand) else sys.executable
+    """The bundled runtime's Python, else the interpreter in use."""
+    install_dir = _install_dir()
+    for cand in (
+        os.path.join(install_dir, "runtime", "python.exe"),
+        os.path.join(install_dir, "runtime", "bin", "python3"),
+    ):
+        if os.path.isfile(cand):
+            return cand
+    return sys.executable
 
 
 def run_local_mcp(action: str):

@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -44,35 +45,79 @@ type Paths struct {
 	Runners []string
 }
 
-func findPaths() Paths {
-	local := os.Getenv("LOCALAPPDATA")
-	if local == "" {
-		home, _ := os.UserHomeDir()
-		local = filepath.Join(home, "AppData", "Local")
+func defaultLocalDir(goos, home, envLocal string) string {
+	if envLocal != "" {
+		return envLocal
 	}
+	switch goos {
+	case "darwin":
+		return filepath.Join(home, "Library", "Application Support")
+	case "windows":
+		return filepath.Join(home, "AppData", "Local")
+	default:
+		if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
+			return xdg
+		}
+		return filepath.Join(home, ".local", "share")
+	}
+}
+
+func findPaths() Paths {
+	home, _ := os.UserHomeDir()
+	local := defaultLocalDir(runtime.GOOS, home, os.Getenv("LOCALAPPDATA"))
 	exeDir := ""
 	if exe, err := os.Executable(); err == nil {
+		if realExe, err := filepath.EvalSymlinks(exe); err == nil {
+			exe = realExe
+		}
 		exeDir = filepath.Dir(exe)
 	}
 	return pathsFor(local, appDirFor(local, exeDir))
 }
 
-// appDirFor is the exe's own directory when it holds the bridge (an installed or an
-// unzipped release package, which runs wherever it was unpacked), else the standard
-// install, so a dev build run from console\dist still finds its bridge and runtime.
+// appDirFor is the exe's own directory (or on macOS, the directory holding Colab-yoga.app)
+// when it holds the bridge (an installed or an unzipped release package, which runs wherever
+// it was unpacked), else the standard install, so a dev build run from console/dist still
+// finds its bridge and runtime.
 func appDirFor(local, exeDir string) string {
-	if exeDir != "" && fileExists(filepath.Join(exeDir, "bridge", "colab_yoga_bridge.py")) {
-		return exeDir
+	return appDirForOS(runtime.GOOS, local, exeDir)
+}
+
+func appDirForOS(goos, local, exeDir string) string {
+	if exeDir != "" {
+		if fileExists(filepath.Join(exeDir, "bridge", "colab_yoga_bridge.py")) {
+			return exeDir
+		}
+		if goos == "darwin" && filepath.Base(exeDir) == "MacOS" {
+			contentsDir := filepath.Dir(exeDir)
+			bundleDir := filepath.Dir(contentsDir)
+			if filepath.Base(contentsDir) == "Contents" && strings.HasSuffix(bundleDir, ".app") {
+				parent := filepath.Dir(bundleDir)
+				if fileExists(filepath.Join(parent, "bridge", "colab_yoga_bridge.py")) {
+					return parent
+				}
+			}
+		}
 	}
 	return filepath.Join(local, "Programs", "Colab-yoga")
 }
 
 func pathsFor(local, appDir string) Paths {
+	return pathsForOS(runtime.GOOS, local, appDir)
+}
+
+func pathsForOS(goos, local, appDir string) Paths {
 	cfg := filepath.Join(local, "Colab-yoga")
+	py := filepath.Join(appDir, "runtime", "bin", "python3")
+	pyw := py
+	if goos == "windows" {
+		py = filepath.Join(appDir, "runtime", "python.exe")
+		pyw = filepath.Join(appDir, "runtime", "pythonw.exe")
+	}
 	return Paths{
 		AppDir:    appDir,
-		Python:    filepath.Join(appDir, "runtime", "python.exe"),
-		PythonW:   filepath.Join(appDir, "runtime", "pythonw.exe"),
+		Python:    py,
+		PythonW:   pyw,
 		Bridge:    filepath.Join(appDir, "bridge", "colab_yoga_bridge.py"),
 		ConfigDir: cfg,
 		Settings:  filepath.Join(cfg, "settings.json"),
@@ -849,10 +894,14 @@ func magpieGatewayUp() *bool {
 	return gwState
 }
 
-// magpieExe is the magpie CLI: ~/.local/bin/magpie.exe, else on PATH; "" when not installed.
+// magpieExe is the magpie CLI: ~/.local/bin/magpie(.exe), else on PATH; "" when not installed.
 func magpieExe() string {
 	home, _ := os.UserHomeDir()
-	if exe := filepath.Join(home, ".local", "bin", "magpie.exe"); fileExists(exe) {
+	binName := "magpie"
+	if runtime.GOOS == "windows" {
+		binName = "magpie.exe"
+	}
+	if exe := filepath.Join(home, ".local", "bin", binName); fileExists(exe) {
 		return exe
 	}
 	if p, err := exec.LookPath("magpie"); err == nil {
