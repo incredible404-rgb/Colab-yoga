@@ -1397,11 +1397,15 @@ def _keeper_python() -> str:
 
 def spawn_keeper() -> bool:
     """Start `keeper` as a detached process that outlives this one, the way the console's
-    SpawnKeeper does: <app>/runtime/pythonw.exe -X utf8 <bridge> keeper, own process group,
+    SpawnKeeper does: <app>/runtime/pythonw.exe -s -X utf8 <bridge> keeper, own process group,
     no window, outside this process's job when Windows allows."""
     bridge = os.path.abspath(__file__)
     install_dir = os.path.dirname(os.path.dirname(bridge))
-    cmd = [_keeper_python(), "-X", "utf8", bridge, "keeper"]
+    py = _keeper_python()
+    # -s keeps the user's own site-packages from shadowing the pinned ones (the macOS runtime
+    # reads them); a host Python used for a dev run may have its packages only there.
+    bundled = os.path.abspath(py).startswith(os.path.join(install_dir, "runtime") + os.sep)
+    cmd = [py] + (["-s"] if bundled else []) + ["-X", "utf8", bridge, "keeper"]
     env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
     kwargs = dict(cwd=install_dir, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                   stderr=subprocess.DEVNULL, close_fds=True)
