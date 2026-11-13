@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: console/go.mod
+          cache-dependency-path: console/go.sum
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      # The same command contributors run locally: bundled runtime, pinned wheels, AST,
+      # go vet, go test, bridge and server tests. --root keeps it out of the user profile.
+      - name: tools/install.py --check
+        run: python tools/install.py --root "${{ runner.temp }}/colab-yoga-ci" --check

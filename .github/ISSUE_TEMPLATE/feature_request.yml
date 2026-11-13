@@ -1,0 +1,15 @@
+name: Feature request / 功能建议
+description: Something Colab-yoga should do / 希望增加的能力
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do / 想解决什么
+      description: The situation, not the solution. 先说场景，不急着说方案。
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind / 设想的做法

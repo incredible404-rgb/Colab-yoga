@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security issue / 安全问题
+    url: https://github.com/incredible404-rgb/Colab-yoga/security/advisories/new
+    about: Report a vulnerability privately. 请私下报告漏洞，不要开公开 issue。
+  - name: Models, kernels and Tailscale setup / 模型、内核与 Tailscale 配置
+    url: https://github.com/incredible404-rgb/colab-gpu-llm-service/issues
+    about: Those live in colab-gpu-llm-service. 这部分在 colab-gpu-llm-service 仓库。
