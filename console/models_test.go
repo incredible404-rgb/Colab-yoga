@@ -265,8 +265,8 @@ func TestPostCarriesTheBearerFromTheTokenFile(t *testing.T) {
 		gotAuth.Store(r.Header.Get("Authorization"))
 		if r.Method == "GET" {
 			gets.Add(1)
-			if r.Header.Get("Authorization") != "" {
-				t.Error("status polls need no token and must not send it")
+			if r.Header.Get("Authorization") != "Bearer def456" {
+				t.Error("full status polls must carry the current control token")
 			}
 		}
 		_, _ = w.Write([]byte(`{"server_version":"x"}`))

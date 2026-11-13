@@ -407,7 +407,8 @@ class UrlParsingTests(unittest.TestCase):
         ast.parse(self.cb._KEEPER_CODE)
         self.assertIn("colab_yoga_server.log", self.cb._KEEPER_CODE)
         self.assertIn("COLAB_YOGA_URL=", self.cb._KEEPER_CODE)
-        self.assertIn("/api/status", self.cb._KEEPER_CODE)
+        self.assertIn("/health", self.cb._KEEPER_CODE)
+        self.assertNotIn("/api/status", self.cb._KEEPER_CODE)
         self.assertIn("colab_yoga_server.py", self.cb._KEEPER_CODE)
 
 

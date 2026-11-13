@@ -272,6 +272,9 @@ func (a *App) pollStatus(url string) {
 			return
 		}
 		if err != nil {
+			if errors.Is(err, errUnauthorized) && !a.tokenStale {
+				a.noteAuth(err)
+			}
 			a.failures++
 			if a.failures >= 5 && a.connected {
 				a.connected = false
@@ -289,6 +292,7 @@ func (a *App) pollStatus(url string) {
 
 func (a *App) applyStatus(st *Status) {
 	a.status, a.connected, a.failures = st, true, 0
+	a.tokenStale = false
 	a.statusAt = a.now()
 	a.wakeErr = ""
 	push := func(i int, used, total float64) {
@@ -358,14 +362,22 @@ func (a *App) refreshAccount() {
 			a.logf("查询 Colab 账号失败：%s", shortErr(err))
 			return
 		}
-		acct, perr := parseAccount(m)
-		if perr != "" {
-			a.logf("查询 Colab 账号失败：%s", perr)
-			return
-		}
-		a.acct, a.acctAt = acct, a.now()
-		a.updateTray()
+		a.applyAccountResult(m)
 	})
+}
+
+func (a *App) applyAccountResult(m map[string]any) {
+	acct, perr := parseAccount(m)
+	if perr != "" {
+		if reauth, _ := m["reauth_required"].(bool); reauth {
+			a.acct.Known, a.acct.LoggedIn = true, false
+			a.updateTray()
+		}
+		a.logf("查询 Colab 账号失败：%s", perr)
+		return
+	}
+	a.acct, a.acctAt = acct, a.now()
+	a.updateTray()
 }
 
 // updateTray keeps the tray tooltip on the two numbers that matter.
@@ -600,7 +612,7 @@ func (a *App) discover(manual bool) {
 			alive, _ := m["app_alive"].(bool)
 			if saved, _ := m["token_saved"].(bool); saved && a.tokenStale {
 				a.tokenStale = false
-				a.flash("已从云端重新取得控制令牌，请再点一次刚才的操作")
+				a.flash("已从云端重新取得控制令牌")
 				return
 			}
 			switch {

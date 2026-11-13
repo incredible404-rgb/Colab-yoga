@@ -1266,14 +1266,24 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def require_token(request, call_next):
-        # The server is reachable from the internet through its gradio.live tunnel, whose
-        # forwarder connects from 127.0.0.1, so a loopback source says nothing about the
-        # caller: there is no exemption by address. The keeper only reads /api/status.
-        if not (request.method == "GET" and request.url.path == "/api/status"):
+        # The public tunnel also connects from loopback. Only the minimal keeper health
+        # response is public; full status includes runner logs and task messages.
+        if not (request.method == "GET" and request.url.path == "/health"):
             if not _token_ok(request.headers.get("authorization", "")):
                 return JSONResponse({"detail": "unauthorized"}, status_code=401,
                                     headers={"WWW-Authenticate": "Bearer"})
         return await call_next(request)
+
+    @app.get("/health")
+    def api_health():
+        return {
+            "ok": True,
+            "idle_timeout_minutes": IDLE_TIMEOUT_MINUTES,
+            "idle_remaining_seconds": idle_remaining_seconds(),
+            "is_downloading": TASK_STATE["is_downloading"],
+            "is_loading_vram": TASK_STATE["is_loading_vram"],
+            "llm_online": bool(LLM_8081_STATE["online"]),
+        }
 
     @app.get("/api/status")
     def api_status():

@@ -6,7 +6,7 @@ The server runs on the Colab VM and is reached through its public tunnel URL. Ge
 
 ## Authentication
 
-Every call except `GET /api/status` needs `Authorization: Bearer <token>`. Without it, or with a wrong token, the answer is `401 {"detail": "unauthorized"}`. `/api/status` is open so a quick check needs nothing.
+Every call except `GET /health` needs `Authorization: Bearer <token>`. Without it, or with a wrong token, the answer is `401 {"detail": "unauthorized"}`. Full status includes console logs and task messages and is private.
 
 The token is the `token` field of `%LOCALAPPDATA%\Colab-yoga\server_token.json`, written by `wake` and refreshed by `discover_url`. A 401 with the token you have usually means the server was redeployed from elsewhere: run `discover_url`, re-read the file, retry once. Never print, log or paste the token. A loopback source is not exempt: the public tunnel's forwarder connects from 127.0.0.1.
 
@@ -14,7 +14,8 @@ The token is the `token` field of `%LOCALAPPDATA%\Colab-yoga\server_token.json`,
 
 | Method | Path | Auth | Body | Effect and answer |
 |---|---|---|---|---|
-| GET | `/api/status` | none | | The status object below. |
+| GET | `/health` | none | | Only `ok`, `idle_timeout_minutes`, `idle_remaining_seconds`, `is_downloading`, `is_loading_vram`, `llm_online`; reading it does not extend the idle timer. |
+| GET | `/api/status` | Bearer | | The full status object below, including logs. |
 | POST | `/api/load_model` | Bearer | `{"model_id": "<slug>", "context_length": <int, optional>, "hf_token": "<optional>"}` | Starts the runner of `model_id` (a slug in `colab_kernel_runners.json`; empty or missing gives `400 {"ok": false, "message": "model_id is required"}`) and replaces whatever runs on `:8081`. `context_length` is clamped to 4096..262144. `hf_token` is passed to the runner as `HF_TOKEN` for gated downloads. Returns immediately with the status; progress shows in `is_downloading`, `is_loading_vram`, `task_progress`, `task_message`. Interrupts live chats. |
 | POST | `/api/unload_model` | Bearer | `{"model_id": "<slug, optional>"}` | Stops `:8081` and a boot still running. A `model_id` that is not the served one is a no-op. Returns the status. |
 | POST | `/api/touch` | Bearer | `{}` | Resets the idle countdown. Returns the status. |
@@ -42,7 +43,8 @@ The GPU/RAM/disk telemetry and the `:8081` probe are cached for about 2 s, so po
 ```powershell
 $base = "<WAKE_URL value>"
 $tok  = (Get-Content "$env:LOCALAPPDATA\Colab-yoga\server_token.json" -Raw | ConvertFrom-Json).token
-Invoke-RestMethod "$base/api/status"                                  # open
+Invoke-RestMethod "$base/health"                                     # minimal public health
+Invoke-RestMethod "$base/api/status" -Headers @{Authorization = "Bearer $tok"}
 Invoke-RestMethod "$base/api/touch" -Method Post -Body '{}' -ContentType 'application/json' `
   -Headers @{Authorization = "Bearer $tok"}                           # needs the token
 ```

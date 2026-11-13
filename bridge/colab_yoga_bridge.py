@@ -28,8 +28,10 @@ import json
 import time
 import threading
 import argparse
+from functools import partial
 
 import requests
+from google.auth.exceptions import RefreshError, TransportError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -100,6 +102,24 @@ def _load_client_config() -> dict:
 
 
 _CHECKED_CREDS = None  # what _has_valid_token just validated or refreshed, for the same process to reuse
+AUTH_REFRESH_ATTEMPTS = 3
+AUTH_REFRESH_TIMEOUT_S = 5
+
+
+class AuthUnavailableError(Exception):
+    """Verification failed without establishing that the saved account is signed out."""
+
+    def __init__(self, message: str, retryable: bool = False, reauth_required: bool = False):
+        super().__init__(message)
+        self.retryable = retryable
+        self.reauth_required = reauth_required
+
+
+def _auth_unavailable(err: AuthUnavailableError) -> None:
+    result = {"ok": False, "retryable": err.retryable, "error": str(err)}
+    if err.reauth_required:
+        result["reauth_required"] = True
+    print(json.dumps(result))
 
 
 def _has_valid_token() -> bool:
@@ -109,18 +129,41 @@ def _has_valid_token() -> bool:
         return False
     try:
         creds = Credentials.from_authorized_user_file(TOKEN_CONFIG_PATH, PUBLIC_SCOPES)
-        if creds and creds.valid:
-            _CHECKED_CREDS = creds
-            return True
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-            with open(TOKEN_CONFIG_PATH, "w", encoding="utf-8") as f:
-                f.write(creds.to_json())
-            _CHECKED_CREDS = creds
-            return True
-    except Exception:
+    except ValueError as err:
+        raise AuthUnavailableError("本地 Google 凭据格式无效，请重新绑定账号", reauth_required=True) from err
+    except OSError as err:
+        raise AuthUnavailableError("无法读取本地 Google 凭据，请稍后重试；现有登录状态保留") from err
+    if creds and creds.valid:
+        _CHECKED_CREDS = creds
+        return True
+    if not (creds and creds.expired and creds.refresh_token):
         return False
-    return False
+    request = partial(Request(), timeout=AUTH_REFRESH_TIMEOUT_S)
+    for attempt in range(AUTH_REFRESH_ATTEMPTS):
+        try:
+            creds.refresh(request)
+            break
+        except (TransportError, requests.RequestException, RefreshError) as err:
+            details = next((arg for arg in err.args if isinstance(arg, dict)), {})
+            if isinstance(err, RefreshError) and details.get("error") == "invalid_grant":
+                return False
+            retryable = (isinstance(err, (TransportError, requests.RequestException))
+                         or bool(getattr(err, "retryable", False))
+                         or details.get("error") in ("server_error", "temporarily_unavailable"))
+            if retryable and attempt + 1 < AUTH_REFRESH_ATTEMPTS:
+                time.sleep(attempt + 1)
+                continue
+            message = ("暂时无法通过网络验证 Google 登录，请稍后重试；现有登录状态保留" if retryable
+                       else "Google 授权验证失败，请检查客户端配置或重新绑定账号")
+            reauth_required = details.get("error") in ("invalid_client", "unauthorized_client")
+            raise AuthUnavailableError(message, retryable=retryable, reauth_required=reauth_required) from err
+    try:
+        with open(TOKEN_CONFIG_PATH, "w", encoding="utf-8") as f:
+            f.write(creds.to_json())
+    except OSError as err:
+        raise AuthUnavailableError("无法保存 Google 凭据，请检查本地文件权限；现有登录状态保留") from err
+    _CHECKED_CREDS = creds
+    return True
 
 
 PKCE_VERIFIER_PATH = os.path.expanduser("~/.config/colab-cli/pkce_verifier.txt")
@@ -315,7 +358,12 @@ def _run_together(*fns):
 
 
 def cmd_auth_status():
-    if not _has_valid_token():
+    try:
+        logged_in = _has_valid_token()
+    except AuthUnavailableError as err:
+        _auth_unavailable(err)
+        return
+    if not logged_in:
         print(json.dumps({"ok": True, "logged_in": False}))
         return
 
@@ -371,7 +419,12 @@ def cmd_auth_status():
 
 
 def cmd_stop_all():
-    if not _has_valid_token():
+    try:
+        logged_in = _has_valid_token()
+    except AuthUnavailableError as err:
+        _auth_unavailable(err)
+        return
+    if not logged_in:
         print(json.dumps({"ok": False, "error": "尚未登录 Google Colab CLI"}))
         return
 
@@ -683,7 +736,12 @@ def cmd_wake(gpu_type: str = "G4", server_py_path: str = None, app_py_path: str 
     Returns True only when the server printed its WAKE_URL. An instance allocated by this
     call is released if the deployment then fails; a reused one is left alone.
     """
-    if not _has_valid_token():
+    try:
+        logged_in = _has_valid_token()
+    except AuthUnavailableError as err:
+        print("WAKE_ERROR: " + str(err), flush=True)
+        return False
+    if not logged_in:
         print("WAKE_ERROR: 尚未授权登录 Google 账号，请先点击「🔑 绑定账号」", flush=True)
         return False
 
@@ -900,7 +958,12 @@ def cmd_discover_url():
     Find public URL of server already running on the active runtime.
     Reads server log on the VM instead of redeploying.
     """
-    if not _has_valid_token():
+    try:
+        logged_in = _has_valid_token()
+    except AuthUnavailableError as err:
+        _auth_unavailable(err)
+        return
+    if not logged_in:
         print(json.dumps({"ok": False, "logged_in": False}))
         return
     try:
@@ -971,10 +1034,10 @@ if os.path.exists('/content/colab_yoga_server.log'):
 _o['app_alive'] = subprocess.run(['pgrep', '-f', 'python.*/content/colab_yoga_server.py'], capture_output=True).returncode == 0
 try:
     _opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    _res = _opener.open('http://127.0.0.1:7860/api/status', timeout=15).read()
+    _res = _opener.open('http://127.0.0.1:7860/health', timeout=15).read()
     _d = json.loads(_res)
     _o.update(idle_remaining=_d.get('idle_remaining_seconds'), idle_timeout=_d.get('idle_timeout_minutes'),
-              llm_online=(_d.get('llm_server') or {}).get('online'))
+              llm_online=_d.get('llm_online'))
 except Exception as _e:
     _o['status_error'] = type(_e).__name__
 print('EC_KEEPER:' + json.dumps(_o))
@@ -1283,7 +1346,13 @@ def cmd_keeper():
         return
     st = {"pid": os.getpid(), "started": time.time(), "beats": 0, "beat_fails": 0, "exit_reason": ""}
     _keeper_save(st)
-    if not _has_valid_token():
+    try:
+        logged_in = _has_valid_token()
+    except AuthUnavailableError as err:
+        st.update(exit_reason="auth_unavailable", last_detail=str(err))
+        _keeper_save(st)
+        return
+    if not logged_in:
         st["exit_reason"] = "not_logged_in"
         _keeper_save(st)
         return

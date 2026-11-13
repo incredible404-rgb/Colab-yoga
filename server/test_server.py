@@ -1333,8 +1333,7 @@ class VmBootWaitTest(unittest.TestCase):
 
 
 class ApiTokenTest(BoundStatusTestCase):
-    """The control API is reachable from the internet through the tunnel: every call but
-    GET /api/status needs the bearer token."""
+    """The public health response is minimal; status and control APIs need a token."""
 
     MUTATING = (
         ("post", "/api/touch", {}),
@@ -1347,10 +1346,37 @@ class ApiTokenTest(BoundStatusTestCase):
     def bare(self):
         return TestClient(srv.create_app())  # no Authorization header
 
-    def test_status_is_open_and_everything_else_is_closed_without_a_token(self):
+    def test_full_status_and_logs_require_the_control_token(self):
+        marker = 'private-runner-log-sentinel'
+        with mock.patch.object(srv, 'get_console_lines', return_value=[marker]):
+            for path in ('/api/status', '/api/status?model_id=x'):
+                response = self.bare().get(path)
+                self.assertEqual(response.status_code, 401)
+                self.assertNotIn(marker, response.text)
+            response = self.client.get('/api/status')
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(marker, response.json()['console_lines'])
+
+    def test_public_health_has_only_keeper_fields_and_does_not_reset_idle(self):
+        before = srv.LAST_ACTIVE_TIME
+        marker = 'private-runner-log-sentinel'
+        with mock.patch.object(srv, 'get_console_lines', return_value=[marker]), \
+                mock.patch.object(srv, 'get_hardware_snapshot', side_effect=AssertionError('private telemetry')):
+            response = self.bare().get('/health')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(set(response.json()), {'ok', 'idle_remaining_seconds', 'idle_timeout_minutes',
+                                               'is_downloading', 'is_loading_vram', 'llm_online'})
+        self.assertTrue(response.json()['ok'])
+        self.assertNotIn(marker, response.text)
+        self.assertNotIn(TEST_TOKEN, response.text)
+        self.assertEqual(srv.LAST_ACTIVE_TIME, before)
+        self.assertEqual(self.bare().post('/health').status_code, 401)
+
+    def test_health_is_open_and_everything_else_is_closed_without_a_token(self):
         c = self.bare()
-        self.assertEqual(c.get("/api/status").status_code, 200)
-        self.assertEqual(c.get("/api/status?model_id=x").status_code, 200)
+        self.assertEqual(c.get("/health").status_code, 200)
+        self.assertEqual(c.get("/api/status").status_code, 401)
+        self.assertEqual(c.get("/api/status?model_id=x").status_code, 401)
         with mock.patch.object(srv, "begin_model_load") as load, \
                 mock.patch.object(srv, "disconnect_colab_runtime") as disc, \
                 mock.patch.object(srv, "unload_model") as unload:
@@ -1386,7 +1412,8 @@ class ApiTokenTest(BoundStatusTestCase):
     def test_no_token_configured_means_closed_not_open(self):
         srv.API_TOKEN = ""
         c = self.bare()
-        self.assertEqual(c.get("/api/status").status_code, 200)
+        self.assertEqual(c.get("/health").status_code, 200)
+        self.assertEqual(c.get("/api/status").status_code, 401)
         self.assertEqual(c.post("/api/touch", json={}, headers={"Authorization": "Bearer "}).status_code, 401)
         self.assertEqual(c.post("/api/touch", json={}).status_code, 401)
 

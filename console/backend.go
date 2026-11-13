@@ -311,9 +311,8 @@ type Status struct {
 // earlier deployment. discover_url fetches the current one from the VM.
 var errUnauthorized = errors.New("HTTP 401")
 
-// Server talks to the Colab-yoga server's HTTP API. Every call but GET /api/status needs
-// the Bearer token the bridge stored in tokenPath (wake, discover_url); a server older
-// than the token ignores the header, so sending it is always safe.
+// Server talks to the Colab-yoga server's HTTP API. Full status and control calls
+// need the Bearer token the bridge stored in tokenPath (wake, discover_url).
 type Server struct {
 	http      *http.Client
 	tokenPath string
@@ -369,6 +368,9 @@ func (s *Server) Status(base, modelID string) (*Status, error) {
 	req, err := http.NewRequest("GET", u, nil)
 	if err != nil {
 		return nil, err
+	}
+	if t := s.token(); t != "" {
+		req.Header.Set("Authorization", "Bearer "+t)
 	}
 	return s.do(req)
 }

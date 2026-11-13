@@ -102,9 +102,11 @@ before it prints `WAKE_URL:`. The server reads `COLAB_YOGA_TOKEN`, else that fil
 it makes one and writes the file itself. `discover_url` reads the file back from the VM (the
 same place it reads the URL) and stores it locally without printing it. The token never appears
 in the log, in the status, or in the `COLAB_YOGA_URL` line, and the console and bridge send it
-on every call except `GET /api/status`. There is no exemption for requests from 127.0.0.1: the
+on every full-status and control call. Only `GET /health` is public: it returns liveness,
+idle countdown, download/load flags and whether an LLM is online, without logs, model names,
+telemetry or task messages. There is no exemption for requests from 127.0.0.1: the
 tunnel's forwarder connects from there, so a loopback source proves nothing (the keeper only
-reads `/api/status` inside the VM). A server from before the token ignores the header, so a
+reads `/health` inside the VM). A server from before the token ignores the header, so a
 console that sends one keeps working against it. The token stops the URL alone from being
 enough; it is not a defence against the tunnel operator, who relays the traffic.
 
@@ -140,7 +142,13 @@ removed as links (never recursed into); a directory that is not exactly that lay
   account again leaves the running sessions alone; for another or an unidentifiable account
   it removes only the records whose endpoint the new account does not hold, and removes
   nothing when the new account's assignments cannot be read. Check `auth_status` first:
-  when `logged_in` is already true there is nothing to bind.
+  when `logged_in` is already true there is nothing to bind. Credential refresh retries
+  transport errors and retryable Google errors up to three times. If verification remains
+  unavailable, `auth_status` returns `ok:false` and preserves the console's last known
+  account and billing state. Unusable local credentials or an OAuth client mismatch
+  add `reauth_required:true`, so the console offers binding again while preserving
+  the last known balance and assignments. Confirmed revocation or missing credentials
+  report `logged_in:false`.
 
 ## HTTP API (server, JSON)
 
@@ -168,7 +176,7 @@ until it is restarted.
   `<app>\runtime\pythonw.exe -X utf8 <bridge> keeper` detached.
 - The keeper (`colab_yoga_bridge.py keeper`, detached pythonw) runs one short kernel
   execution every 30 s, which is what stops Colab reclaiming a CLI runtime after 21–35 min.
-  In that execution it reads `/api/status` inside the VM; at `idle_remaining_seconds == 0` it
+  In that execution it reads `/health` inside the VM; at `idle_remaining_seconds == 0` it
   releases the runtime via the official API. It stops if the server is gone for 20 min, the
   assignment disappears, or after 24 h. When a colab_keepalive.py daemon (Track A) already
   covers the runtime it does not stop at once: it skips its own heartbeat and the in-VM

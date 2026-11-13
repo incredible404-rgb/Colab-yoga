@@ -24,7 +24,7 @@ Waking a runtime starts billing; switching models interrupts live chats; releasi
 
 ## Bind the Google account (needs the human)
 
-Run `auth_status` first. If it already says `"logged_in": true`, do not bind again: the token `~/.config/colab-cli/token.json` is shared with colab-gpu-llm-service, which is already using it. Bind only when `logged_in` is false, or the user wants a different account.
+Run `auth_status` first. If it already says `"logged_in": true`, do not bind again: the token `~/.config/colab-cli/token.json` is shared with colab-gpu-llm-service, which is already using it. Bind only when `logged_in` is false, or the user wants a different account. `ok:false` with `retryable:true` means temporary network verification failure after bounded retries: keep the last known account and billing state, then retry later. `reauth_required:true` offers binding again for unusable local credentials or an OAuth client mismatch without clearing the last balance or assignments.
 
 1. `"<py>" -X utf8 "<app>/bridge/colab_yoga_bridge.py" auth_url` (where `<py>` is `<app>\runtime\python.exe` on Windows or `<app>/runtime/bin/python3` on macOS) prints `{"ok": true, "auth_url": ...}`. Give the user that link; they authorise in their browser and copy the code shown.
 2. Pass the code they paste back: `... colab_yoga_bridge.py auth_code <code>`. Done when it answers `"logged_in": true`. The code is single-use and secret: pass it straight through, never log or repeat it. Authorising the same account again keeps the running sessions; for a different account only the session records it does not hold are dropped.
@@ -46,7 +46,7 @@ Every current model needs a G4 (about 96 GB of VRAM); T4 and L4 are for testing 
 
 A wake takes minutes; run it in the background and watch for the `WAKE_URL:` prefix. By the time that line shows, `wake` has also started a detached keeper if none was alive, so the runtime stays up without the console.
 
-With the server URL, the runtime answers JSON over HTTP: `GET /api/status` (GPU, VRAM, model on `:8081`, idle seconds left, load progress; no token needed), and `POST /api/touch` (reset the idle countdown) / `load_model` / `unload_model` / `config_idle` / `disconnect`. Every POST needs `Authorization: Bearer <token>`; the token is the `token` field of `%LOCALAPPDATA%\Colab-yoga\server_token.json`, written by `wake` and refreshed by `discover_url`. A 401 means that file is stale (the server was redeployed from elsewhere): run `discover_url`, then retry. Never print or log the token. Methods, bodies, answers and the status fields are in [references/api.md](references/api.md) in this skill folder; read it before calling anything but `status` and `touch`.
+With the server URL, `GET /health` returns only minimal liveness and idle fields. `GET /api/status` returns GPU, VRAM, model, idle timer, load progress and logs. Full status and every POST need `Authorization: Bearer <token>`; the token is the `token` field of `%LOCALAPPDATA%\Colab-yoga\server_token.json`, written by `wake` and refreshed by `discover_url`. The console attaches it automatically. A 401 means that file is missing or stale: run `discover_url`, then retry once. Never print or log the token. Methods, bodies, answers and the status fields are in [references/api.md](references/api.md) in this skill folder; read it before calling anything but `status` and `touch`.
 
 ## Liveness
 
