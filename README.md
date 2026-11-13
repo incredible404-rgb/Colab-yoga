@@ -2,6 +2,8 @@
 
 中文 | [English](README.en.md)
 
+[![Listed on Awesome MyGo](https://awesomemygo.dev/badge.svg)](https://awesomemygo.dev/apps/colab-yoga)
+
 常驻系统托盘的 Colab GPU 管理台：一键唤醒、释放 Google Colab 付费 GPU 上的大模型实例，随时查看余额和各入口是否连通，没人用时自动关停。
 
 在 Google Colab 付费 GPU（默认 G4 · RTX PRO 6000 96 GB）上跑自己的大模型，并通过 Tailscale 把 llama-server :8081 提供给网页对话、Magpie 和本机 MCP 桥。对话不经过 Colab-yoga，它只负责管理 GPU：花了多少钱、跑的是哪个模型、每个入口通不通，以及让实例在有人用时一直活着、没人用时自动释放。

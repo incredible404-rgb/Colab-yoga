@@ -2,6 +2,8 @@
 
 [简体中文](README.md) | English
 
+[![Listed on Awesome MyGo](https://awesomemygo.dev/badge.svg)](https://awesomemygo.dev/apps/colab-yoga)
+
 A system tray console for self-hosted LLMs on paid Google Colab GPUs: wake or release the instance in one click, keep an eye on your balance and on whether each endpoint is reachable, and let it shut down on its own when nobody is using it.
 
 Run your own large language models on paid Google Colab GPUs (default: G4 · RTX PRO 6000 96 GB) and expose `llama-server :8081` over Tailscale to web chat, Magpie, and the local MCP bridge. Chat traffic does not pass through Colab-yoga; Colab-yoga only manages the GPU: how much it costs, which model is running, whether each entrypoint is reachable, keeping the instance alive while in use, and releasing it automatically when idle.
