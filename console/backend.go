@@ -391,7 +391,10 @@ func (s *Server) Post(base, path string, body any) (*Status, error) {
 type Bridge struct{ p Paths }
 
 func (b *Bridge) cmd(python string, args ...string) *exec.Cmd {
-	cmd := exec.Command(python, append([]string{"-X", "utf8", b.p.Bridge}, args...)...)
+	// -s: the macOS runtime is a full CPython that would otherwise put the user's own
+	// site-packages ahead of the pinned ones (the Windows embeddable build never reads them).
+	// A flag, not PYTHONNOUSERSITE: the environment is inherited by whatever the local MCP runs.
+	cmd := exec.Command(python, append([]string{"-s", "-X", "utf8", b.p.Bridge}, args...)...)
 	cmd.Env = append(os.Environ(), "PYTHONUTF8=1", "PYTHONIOENCODING=utf-8")
 	cmd.Dir = b.p.AppDir
 	hideWindow(cmd)

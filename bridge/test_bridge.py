@@ -743,7 +743,7 @@ class EnsureKeeperTests(unittest.TestCase):
         finally:
             cb.__file__ = saved
         cmd, kw = self.popen_calls[0]
-        self.assertEqual(cmd, [str(install / "runtime" / "pythonw.exe"), "-X", "utf8",
+        self.assertEqual(cmd, [str(install / "runtime" / "pythonw.exe"), "-s", "-X", "utf8",
                                os.path.abspath(fake_file), "keeper"])
         self.assertEqual(kw["cwd"], str(install))
         self.assertEqual(kw["stdout"], cb.subprocess.DEVNULL)  # must not hold wake's output pipe open
@@ -784,8 +784,15 @@ class LocalMcpTests(unittest.TestCase):
         self.on_sleep = lambda now: None
         self.real_find = getattr(cb, "local_mcp_script_path", None)
         self._saved = {}
+        real_sleep = time.sleep
 
         def sleep(sec):
+            # Only the keeper loop (this thread) runs on fake time. On POSIX, subprocess.run
+            # polls with time.sleep inside the check thread; settling from there would make it
+            # and the keeper wait on each other for the whole join timeout.
+            if threading.current_thread() is not threading.main_thread():
+                real_sleep(sec)
+                return
             self.now += sec
             self.on_sleep(self.now)
             if self.settle_checks:
