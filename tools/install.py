@@ -518,15 +518,15 @@ def check_go(console_dir: Path) -> bool:
 def run_tests(paths: InstallPaths) -> bool:
     py = find_python(paths)
     ok = True
-    bridge_test = paths.repo / "bridge" / "test_bridge.py"
-    if bridge_test.is_file():
-        print(f"Running {bridge_test.relative_to(paths.repo)} with {py}...")
+    for bridge_test in sorted((paths.repo / "bridge").glob("test_*.py")):
+        rel = bridge_test.relative_to(paths.repo).as_posix()
+        print(f"Running {rel} with {py}...")
         r = subprocess.run([py, "-X", "utf8", str(bridge_test)], stdin=subprocess.DEVNULL)
         if r.returncode != 0:
             ok = False
-            print("bridge/test_bridge.py FAILED")
+            print(f"{rel} FAILED")
         else:
-            print("bridge/test_bridge.py OK")
+            print(f"{rel} OK")
 
     server_test = paths.repo / "server" / "test_server.py"
     if server_test.is_file():

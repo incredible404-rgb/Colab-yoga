@@ -3,9 +3,13 @@ import contextlib
 import io
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest import mock
+
+# The bundled Windows runtime does not put the script's own directory on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from google.auth.exceptions import RefreshError, TransportError
 import colab_yoga_bridge as cb
