@@ -2,9 +2,15 @@ name: Release
 
 # Pushing a tag vX.Y.Z builds the portable zip on each platform and attaches it, with its
 # .sha256, to a draft release of that tag. Publishing the draft stays a manual step.
+# Run it by hand with a tag to build that tag again.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to package, e.g. v0.5.3
+        required: true
 
 permissions:
   contents: write
@@ -22,9 +28,12 @@ jobs:
         shell: bash
     env:
       GH_TOKEN: ${{ github.token }}
-      OUT: ${{ runner.temp }}/colab-yoga-release
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/setup-go@v7
         with:
           go-version-file: console/go.mod
@@ -35,14 +44,14 @@ jobs:
       - name: The tag is the version in console/mygo.json
         run: |
           version=$(python -c "import json; print(json.load(open('console/mygo.json', encoding='utf-8'))['version'])")
-          test "v$version" = "$GITHUB_REF_NAME"
+          test "v$version" = "$TAG"
       - name: tools/package.py
-        run: python tools/package.py --out "$OUT"
+        run: python tools/package.py --out "$RUNNER_TEMP/colab-yoga-release"
       - name: Attach to the draft release
         run: |
           # Both platforms may get here together: whichever loses the create finds the draft.
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
-            || gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "$GITHUB_REF_NAME" --notes "" \
-            || gh release view "$GITHUB_REF_NAME" >/dev/null
-          cd "$OUT"
-          gh release upload "$GITHUB_REF_NAME" Colab-yoga-*.zip Colab-yoga-*.zip.sha256 --clobber --repo "$GITHUB_REPOSITORY"
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes "" \
+            || gh release view "$TAG" >/dev/null
+          cd "$RUNNER_TEMP/colab-yoga-release"
+          gh release upload "$TAG" Colab-yoga-*.zip Colab-yoga-*.zip.sha256 --clobber
