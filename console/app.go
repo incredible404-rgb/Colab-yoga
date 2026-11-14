@@ -104,6 +104,11 @@ type App struct {
 	tick              int
 	now               func() time.Time
 	disableBackground bool // tests
+
+	version   string    // this build's version ("" under go run and in tests that set none)
+	updateTag string    // a release newer than this build, "" when there is none
+	updateAt  time.Time // when GitHub was last asked
+	updateOff bool      // settings.json says "updateCheck": "off"
 }
 
 func newApp(p Paths) *App {
@@ -128,6 +133,12 @@ func newApp(p Paths) *App {
 	a.keeper = readKeeper(p.Keeper)
 	a.ledger = readLedger(p.Ledger)
 	return a
+}
+
+// setVersion names this build and takes up what the last update check found for it.
+func (a *App) setVersion(v string) {
+	a.version = v
+	a.loadUpdate(a.set.Load())
 }
 
 // apply runs fn on the main thread and redraws the window if one shows (directly in
@@ -182,6 +193,11 @@ func (a *App) run() {
 	for range t.C {
 		a.apply(func() { a.tick++ })
 		a.step()
+		due := make(chan bool, 1)
+		a.apply(func() { due <- a.updateDue() })
+		if <-due {
+			a.once("update", a.checkUpdate)
+		}
 	}
 }
 

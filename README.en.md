@@ -55,6 +55,8 @@ Two ways, and neither depends on another application's install directory: Colab-
 3. Settings and state live in `%LOCALAPPDATA%\Colab-yoga` (Windows) or `~/Library/Application Support/Colab-yoga` (macOS), not in the unzipped folder. The package creates no shortcuts and writes nothing to the registry; delete the folder to uninstall.
 4. The model list `colab_kernel_runners.json` (exported by colab-gpu-llm-service's `colab_kernel.py`, contains API keys) and the local MCP config `local_mcp_bridge.json` are both written to that config directory by default, and the console reads them from there, so the package works from any folder with no files to copy by hand; a file of the same name next to the app binary takes precedence. The package ships neither; without a model list the model library is empty and says how to export one.
 
+**Update notice.** At most once a day the console asks GitHub for the version number of the latest release; when there is a newer one, a row "新版本 x.y.z" appears above the account at the bottom left and opens that release's page. It only tells you: nothing is downloaded or replaced on its own. Getting the new package and unpacking it over the old one is up to you, and settings and state are untouched. To stop the request, add `"updateCheck": "off"` to `settings.json`.
+
 ### Option 2: install from source
 
 - **Windows 10/11 x64**: [Go](https://go.dev/dl/) 1.27+; [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows) (`pwsh`, used for shortcuts and process handling); and [python.org](https://www.python.org/downloads/windows/) Python 3.10+ with pip.
