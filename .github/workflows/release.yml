@@ -1,0 +1,48 @@
+name: Release
+
+# Pushing a tag vX.Y.Z builds the portable zip on each platform and attaches it, with its
+# .sha256, to a draft release of that tag. Publishing the draft stays a manual step.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    env:
+      GH_TOKEN: ${{ github.token }}
+      OUT: ${{ runner.temp }}/colab-yoga-release
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: console/go.mod
+          cache-dependency-path: console/go.sum
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: The tag is the version in console/mygo.json
+        run: |
+          version=$(python -c "import json; print(json.load(open('console/mygo.json', encoding='utf-8'))['version'])")
+          test "v$version" = "$GITHUB_REF_NAME"
+      - name: tools/package.py
+        run: python tools/package.py --out "$OUT"
+      - name: Attach to the draft release
+        run: |
+          # Both platforms may get here together: whichever loses the create finds the draft.
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --draft --verify-tag --title "$GITHUB_REF_NAME" --notes "" \
+            || gh release view "$GITHUB_REF_NAME" >/dev/null
+          cd "$OUT"
+          gh release upload "$GITHUB_REF_NAME" Colab-yoga-*.zip Colab-yoga-*.zip.sha256 --clobber --repo "$GITHUB_REPOSITORY"
