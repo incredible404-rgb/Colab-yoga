@@ -2,7 +2,7 @@
 
 中文 | [English](README.en.md)
 
-[![Listed on Awesome MyGo](https://awesomemygo.dev/badge.svg)](https://awesomemygo.dev/apps/colab-yoga)
+[![CI](https://github.com/incredible404-rgb/Colab-yoga/actions/workflows/ci.yml/badge.svg)](https://github.com/incredible404-rgb/Colab-yoga/actions/workflows/ci.yml) [![Listed on Awesome MyGo](https://awesomemygo.dev/badge.svg)](https://awesomemygo.dev/apps/colab-yoga)
 
 常驻系统托盘的 Colab GPU 管理台：一键唤醒、释放 Google Colab 付费 GPU 上的大模型实例，随时查看余额和各入口是否连通，没人用时自动关停。
 

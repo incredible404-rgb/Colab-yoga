@@ -2,7 +2,7 @@
 
 [简体中文](README.md) | English
 
-[![Listed on Awesome MyGo](https://awesomemygo.dev/badge.svg)](https://awesomemygo.dev/apps/colab-yoga)
+[![CI](https://github.com/incredible404-rgb/Colab-yoga/actions/workflows/ci.yml/badge.svg)](https://github.com/incredible404-rgb/Colab-yoga/actions/workflows/ci.yml) [![Listed on Awesome MyGo](https://awesomemygo.dev/badge.svg)](https://awesomemygo.dev/apps/colab-yoga)
 
 A system tray console for self-hosted LLMs on paid Google Colab GPUs: wake or release the instance in one click, keep an eye on your balance and on whether each endpoint is reachable, and let it shut down on its own when nobody is using it.
 
