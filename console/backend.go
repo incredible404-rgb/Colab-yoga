@@ -163,10 +163,9 @@ func writeInstallAnchor(p Paths) {
 	}
 }
 
-// defaultNovelRoot is the MCP card's working folder before one is set: the local MCP's own
-// cwd (~/.config/colab-cli/local-mcp.json), else ~/Documents/Colab创作 when it exists, else
-// ~/Documents.
-func defaultNovelRoot(home string) string {
+// defaultMcpRoot is the MCP card's working folder before one is set: the local MCP's own
+// cwd (~/.config/colab-cli/local-mcp.json), else ~/Documents.
+func defaultMcpRoot(home string) string {
 	if b, err := os.ReadFile(filepath.Join(home, ".config", "colab-cli", "local-mcp.json")); err == nil {
 		var cfg struct {
 			Cwd string `json:"cwd"`
@@ -174,9 +173,6 @@ func defaultNovelRoot(home string) string {
 		if json.Unmarshal(b, &cfg) == nil && strings.TrimSpace(cfg.Cwd) != "" {
 			return cfg.Cwd
 		}
-	}
-	if d := filepath.Join(home, "Documents", "Colab创作"); fileExists(d) {
-		return d
 	}
 	return filepath.Join(home, "Documents")
 }

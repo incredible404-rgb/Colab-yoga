@@ -3,8 +3,8 @@ package main
 // The model list is whatever colab_kernel_runners.json holds (exported by
 // colab-gpu-llm-service's colab_kernel.py): one entry per model, keyed by its slug, with the
 // `alias` llama-server reports and the shard `files` whose sizes add up to the download.
-// knownModels only adds the author's curated display names, tags and notes to the models
-// it already knew; any other model shows its alias and the summed size.
+// An entry may carry a display `name`, `tags` and a `note`; without them the model shows
+// its alias and the summed size. The console knows no model of its own.
 
 import (
 	"encoding/json"
@@ -23,23 +23,12 @@ type Model struct {
 	Note            string
 }
 
-type modelInfo struct {
-	Name string
-	Tags []string
-	Note string
-}
-
-var knownModels = map[string]modelInfo{
-	"qwen38-huihui-v2": {"Qwen3.8-Flash-Next (Huihui v2)", []string{"125B-A6B MoE", "UD-Q4_K_XL", "视觉", "MTP"}, "默认主力 · 104 tok/s"},
-	"gemma4-31b":       {"Gemma-4-31B (ARA Heretic Q8_0)", []string{"31B 稠密", "Q8_0", "视觉", "MTP"}, "约 1/3 显存，加载最快"},
-	"qwen38-27b-rvn":   {"Qwen3.8-27B (RVN Heretic BF16)", []string{"27B 稠密", "BF16", "视觉", "MTP"}, "原精度双重 ARA 破限"},
-	"glm53-flash":      {"GLM-5.3-Flash (320B-A18B)", []string{"320B-A18B MoE", "GSQ-RCO-Q4", "视觉", "部分专家放内存"}, "最大的一个"},
-}
-
 // Runner is what the console reads from one runners entry. The entry's script (`code`,
 // which holds API keys) is only searched for the Tailscale service host, never kept.
 type Runner struct {
 	ID, Alias, Title string
+	Name, Note       string
+	Tags             []string
 	SizeBytes        float64
 	FQDN             string
 }
@@ -88,10 +77,13 @@ func readRunners(path string) ([]Runner, error) {
 			return out, err
 		}
 		var e struct {
-			Slug  string `json:"slug"`
-			Alias string `json:"alias"`
-			Title string `json:"title"`
-			Code  string `json:"code"`
+			Slug  string   `json:"slug"`
+			Alias string   `json:"alias"`
+			Title string   `json:"title"`
+			Name  string   `json:"name"`
+			Note  string   `json:"note"`
+			Tags  []string `json:"tags"`
+			Code  string   `json:"code"`
 			Files []struct {
 				Size float64 `json:"size"`
 			} `json:"files"`
@@ -99,7 +91,8 @@ func readRunners(path string) ([]Runner, error) {
 		if json.Unmarshal(raw, &e) != nil {
 			continue
 		}
-		r := Runner{ID: strings.TrimSpace(e.Slug), Alias: strings.TrimSpace(e.Alias), Title: e.Title, FQDN: fqdnIn(e.Code)}
+		r := Runner{ID: strings.TrimSpace(e.Slug), Alias: strings.TrimSpace(e.Alias), Title: e.Title,
+			Name: strings.TrimSpace(e.Name), Note: e.Note, Tags: e.Tags, FQDN: fqdnIn(e.Code)}
 		if r.ID == "" {
 			r.ID = strings.TrimSpace(key)
 		}
@@ -114,15 +107,12 @@ func readRunners(path string) ([]Runner, error) {
 	return out, nil
 }
 
-// catalogFrom is the model list for these runners: known models keep their curated name
-// and tags; the rest are named by alias, with the size summed from their files.
+// catalogFrom is the model list for these runners: an entry's own name, tags and note when
+// it has them, else its alias; the size is summed from its files.
 func catalogFrom(runners []Runner) []Model {
 	var out []Model
 	for _, r := range runners {
-		m := Model{ID: r.ID, Alias: r.Alias, SizeGB: r.SizeBytes / 1e9}
-		if k, ok := knownModels[r.ID]; ok {
-			m.Name, m.Tags, m.Note = k.Name, k.Tags, k.Note
-		}
+		m := Model{ID: r.ID, Name: r.Name, Alias: r.Alias, SizeGB: r.SizeBytes / 1e9, Tags: r.Tags, Note: r.Note}
 		if m.Name == "" {
 			m.Name = r.Alias
 		}

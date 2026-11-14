@@ -37,14 +37,14 @@ type App struct {
 	bridge *Bridge
 
 	// persisted (settings.json)
-	serverURL, tsURL, mcpURL, novelRoot string
-	catalog                             []Model // from colab_kernel_runners.json
-	catalogSig                          runnersSig
-	gpu                                 string
-	idleMin                             int
-	themeName                           string // "dark" | "light"
-	ctxK                                int
-	hfToken                             string
+	serverURL, tsURL, mcpURL, mcpRoot string
+	catalog                           []Model // from colab_kernel_runners.json
+	catalogSig                        runnersSig
+	gpu                               string
+	idleMin                           int
+	themeName                         string // "dark" | "light"
+	ctxK                              int
+	hfToken                           string
 
 	// live
 	page              string // "dashboard" | "connection"
@@ -114,14 +114,14 @@ func newApp(p Paths) *App {
 	a.tsURL = str(m, "accessTailscaleURL", "")
 	a.reloadCatalog() // also fills an empty access address from the runners
 	a.mcpURL = str(m, "accessMcpURL", "http://127.0.0.1:3426")
-	a.novelRoot = str(m, "accessNovelRoot", "")
-	if a.novelRoot == "" {
-		a.novelRoot = defaultNovelRoot(homeDir())
+	a.mcpRoot = str(m, "accessMcpRoot", "")
+	if a.mcpRoot == "" {
+		a.mcpRoot = defaultMcpRoot(homeDir())
 	}
 	a.gpu = str(m, "wakeGPUChoiceV2", "G4")
 	a.idleMin = int(num(m, "idleTimeoutMinutes", 30))
 	a.themeName = str(m, "consoleTheme", "dark")
-	a.ctxK = int(num(m, "qwenContextLengthK", 256))
+	a.ctxK = int(num(m, "contextLengthK", 256))
 	a.hfToken = str(m, "hfToken", "")
 	a.lastModel = str(m, "selectedModelID", "")
 	a.urlDraft = a.serverURL
@@ -860,7 +860,7 @@ func (a *App) setTheme(name string) {
 
 func (a *App) saveAccessURLs() {
 	a.tsURL = strings.TrimSuffix(strings.TrimRight(strings.TrimSpace(a.tsURL), "/"), "/v1")
-	_ = a.set.Set(map[string]any{"accessTailscaleURL": a.tsURL, "accessMcpURL": a.mcpURL, "accessNovelRoot": a.novelRoot})
+	_ = a.set.Set(map[string]any{"accessTailscaleURL": a.tsURL, "accessMcpURL": a.mcpURL, "accessMcpRoot": a.mcpRoot})
 	a.once("access", a.refreshAccess)
 }
 

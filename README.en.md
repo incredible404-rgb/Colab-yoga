@@ -78,8 +78,6 @@ That one command:
 
 Running it again is an upgrade: dependencies are not reinstalled when their versions match, and a running console is closed first and reopened afterwards. Add `--dry-run` to see what it would do, or `--root <dir>` to try it elsewhere.
 
-When moving over from the earlier EasyColab, the installer once copies the old `settings.json`, moves the newer `colab_kernel_runners.json` from the old directory into the new install, and then deletes the old compatibility layer in `%LOCALAPPDATA%\Programs\EasyColab` (only when it contains nothing but links, the forwarder script and the exe copy; anything else is left alone).
-
 ### Build the portable package yourself
 
 ```bash

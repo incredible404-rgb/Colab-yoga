@@ -78,15 +78,8 @@ def _token_ok(header: str) -> bool:
 
 
 # The models are whatever RUNNERS_FILE holds: slug -> runner, whose `alias` is the name
-# llama-server reports on /v1/models. These are only nicer display names for the models the
-# author ships; any other model is shown by its alias.
-KNOWN_MODEL_NAMES = {
-    "qwen38-huihui-v2": "Qwen3.8-Flash-Next (Huihui v2)",
-    "gemma4-31b": "Gemma-4-31B (ARA Heretic Q8_0)",
-    "qwen38-27b-rvn": "Qwen3.8-27B (RVN Heretic BF16)",
-    "glm53-flash": "GLM-5.3-Flash (320B-A18B 破限)",
-}
-_RUNNER_ALIAS_MEMO: Dict[str, Any] = {"sig": None, "map": {}}
+# llama-server reports on /v1/models and whose optional `name` is what to show for it.
+_RUNNER_ALIAS_MEMO: Dict[str, Any] = {"sig": None, "map": {}, "names": {}}
 
 
 def runner_alias_to_id() -> Dict[str, str]:
@@ -95,12 +88,13 @@ def runner_alias_to_id() -> Dict[str, str]:
     try:
         st = os.stat(RUNNERS_FILE)
     except OSError:
-        _RUNNER_ALIAS_MEMO.update(sig=None, map={})
+        _RUNNER_ALIAS_MEMO.update(sig=None, map={}, names={})
         return {}
     sig = (RUNNERS_FILE, st.st_mtime_ns, st.st_size)
     if _RUNNER_ALIAS_MEMO["sig"] == sig:
         return _RUNNER_ALIAS_MEMO["map"]
     mapping: Dict[str, str] = {}
+    names: Dict[str, str] = {}
     try:
         with open(RUNNERS_FILE, "r", encoding="utf-8") as f:
             runners = json.load(f)
@@ -108,15 +102,20 @@ def runner_alias_to_id() -> Dict[str, str]:
             alias = str((info or {}).get("alias") or "").strip() if isinstance(info, dict) else ""
             if alias:
                 mapping.setdefault(alias, str(slug))
+            name = str(info.get("name") or "").strip() if isinstance(info, dict) else ""
+            if name:
+                names[str(slug)] = name
     except Exception:
-        mapping = {}
-    _RUNNER_ALIAS_MEMO.update(sig=sig, map=mapping)
+        mapping, names = {}, {}
+    _RUNNER_ALIAS_MEMO.update(sig=sig, map=mapping, names=names)
     return mapping
 
 
 def model_display_name(model_id: str) -> str:
-    return KNOWN_MODEL_NAMES.get(model_id) or next(
-        (alias for alias, slug in runner_alias_to_id().items() if slug == model_id), model_id)
+    """The runner's own `name`, else its alias, else the id."""
+    aliases = runner_alias_to_id()
+    return _RUNNER_ALIAS_MEMO["names"].get(model_id) or next(
+        (alias for alias, slug in aliases.items() if slug == model_id), model_id)
 
 
 # ==============================================================================
@@ -603,7 +602,7 @@ def _probe_kernel_llama_8081() -> Optional[Dict[str, Any]]:
     return {
         "model_id": runner_alias_to_id().get(alias, ""),
         "served_alias": alias,
-        "mode_label": f"{alias or '未知模型'} · 256K (svc:qwen :8081)",
+        "mode_label": f"{alias or '未知模型'} · 256K (:8081)",
     }
 
 
@@ -728,7 +727,7 @@ def get_llm_8081_status() -> Dict[str, Any]:
 # ==============================================================================
 # MCP bridge: the WebUI's MCP server entry is http://127.0.0.1:3426/mcp with useProxy, so
 # llama-server connects to 127.0.0.1:3426 on this VM, which must be forwarded through
-# tailscaled's SOCKS5 to local_novel_mcp.py on the user's PC. colab_kernel's boot script
+# tailscaled's SOCKS5 to the local MCP bridge on the user's PC. colab_kernel's boot script
 # starts that forwarder as a thread, which only survives inside a long-lived Jupyter kernel;
 # the runner here is a subprocess that exits. The forwarder therefore runs as its own
 # detached process (MCP_BRIDGE_SCRIPT), so redeploying this server does not cut MCP either.
@@ -1036,7 +1035,7 @@ def _kill_llama_8081() -> None:
 
 def _run_kernel_llm_boot(target_id: str, hf_token: str = "") -> Tuple[bool, str]:
     """Run the one-click boot script exported by colab_kernel.py: parallel download, chat
-    template patch, llama-server :8081, Tailscale svc:qwen and the novel-folder bridge."""
+    template patch, llama-server :8081, the Tailscale Service and the local MCP forwarder."""
     if not os.path.exists(RUNNERS_FILE):
         return False, f"未找到 {RUNNERS_FILE}，请重新唤醒实例以同步脚本。"
     with open(RUNNERS_FILE, "r", encoding="utf-8") as rf:
@@ -1116,7 +1115,7 @@ def _run_kernel_llm_boot(target_id: str, hf_token: str = "") -> Tuple[bool, str]
             return False, f"{name} 脚本已退出但 :8081 未就绪，请检查日志。"
         # The boot script's own MCP forwarder thread died with it; host it here.
         _ensure_mcp_bridge()
-        msg = f"{name} 已装载至显存并开启 Tailscale svc:qwen ({k_now['mode_label']})！"
+        msg = f"{name} 已装载至显存并开启 Tailscale Service ({k_now['mode_label']})！"
         TASK_STATE.update(progress=1.0, message=msg)
         return True, msg
     except Exception as e:

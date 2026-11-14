@@ -413,7 +413,7 @@ class UrlParsingTests(unittest.TestCase):
 
 
 class RunnerPathTests(unittest.TestCase):
-    """Runner file lookup: next to the install, then the standard install; never EasyColab."""
+    """Runner file lookup: next to the install, then the standard install."""
 
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
@@ -423,7 +423,6 @@ class RunnerPathTests(unittest.TestCase):
         self.bridge_py.parent.mkdir(parents=True)
         self.local = self.tmp / "local"
         self.standard_file = self.local / "Programs" / "Colab-yoga" / "colab_kernel_runners.json"
-        self.old_file = self.local / "Programs" / "EasyColab" / "_internal" / "colab_kernel_runners.json"
 
     def _put(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -489,10 +488,6 @@ class RunnerPathTests(unittest.TestCase):
         self._put(self.install_file)
         os.utime(self.install_file, (1000, 1000))  # priority, not age
         self.assertEqual(self._call_resolve(), str(self.install_file))
-
-    def test_old_easycolab_path_is_ignored(self) -> None:
-        self._put(self.old_file)
-        self.assertEqual(self._call_resolve(), str(self.cfg_file))
 
 
 class AuthStatusTests(unittest.TestCase):

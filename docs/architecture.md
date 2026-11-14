@@ -45,23 +45,20 @@ the URL and hash in `install.py`; bumping a package means changing `bridge/requi
 
 Config and state: `%LOCALAPPDATA%\Colab-yoga\settings.json`, `keeper.json`, `ledger.json` (the
 official balance as read, below), `server_token.json` (the control token below; per user, never
-in the repo or a package). An earlier
-install's `%LOCALAPPDATA%\EasyColab\settings.json` and `keeper.json` are copied once, only when
-the new ones do not exist; nothing reads the old directory afterwards.
+in the repo or a package).
 
 Runner scripts (with real keys, never committed or packaged): `colab_kernel_runners.json`, where
 colab-gpu-llm-service's `colab_kernel.py` exports it. Looked up in `<install>\` first, then in
 `%LOCALAPPDATA%\Programs\Colab-yoga\` (which only differs for a package unzipped elsewhere); the
-first that exists wins. Nothing under `Programs\EasyColab` is read.
+first that exists wins.
 
 ### The model list
 
 The models are the entries of that file: one per slug, with `alias` (the name llama-server
 reports on `/v1/models`), `title`, `root_dir`, `files[]` (`size` in bytes) and the boot script
-`code`. Both the console and the server build their model list from it; nothing is hard-coded.
-A model the author ships (`qwen38-huihui-v2`, `gemma4-31b`, `qwen38-27b-rvn`, `glm53-flash`)
-additionally gets a curated display name, tags and a note; any other model is shown by its
-alias, with its size summed from `files`. A served alias that is not in the file is shown as
+`code`, and optionally a display `name`, `tags[]` and a `note`. Both the console and the server
+build their model list from it and know no model of their own: an entry without a `name` is
+shown by its alias, with its size summed from `files`. A served alias that is not in the file is shown as
 that alias and is never taken for one of the known models. Without the file the console lists
 no model and says to export it from colab-gpu-llm-service (`colab_kernel.py`); it re-reads the
 file when it changes. The console takes the access address (Tailscale Service host) from the
@@ -109,15 +106,6 @@ tunnel's forwarder connects from there, so a loopback source proves nothing (the
 reads `/health` inside the VM). A server from before the token ignores the header, so a
 console that sends one keeps working against it. The token stops the URL alone from being
 enough; it is not a defence against the tunnel operator, who relays the traffic.
-
-### Retired: the EasyColab compatibility layer
-
-Earlier installers kept `%LOCALAPPDATA%\Programs\EasyColab` (junctions to `runtime` and
-`site-packages`, a `colab_bridge.py` forwarder, an `EasyColab.exe` copy, a link to the repo) for
-colab-gpu-llm-service's old hard-coded path. That project now uses `Programs\Colab-yoga`, so the
-installer no longer creates any of it and, when it finds a directory that holds only those
-pieces, moves the newer `colab_kernel_runners.json` into the install and deletes it. Links are
-removed as links (never recursed into); a directory that is not exactly that layout is left alone.
 
 ## VM side
 

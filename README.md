@@ -78,8 +78,6 @@ python3 tools/install.py
 
 重复运行就是升级：依赖版本没变就不会重新安装，正在运行的管理台会先关掉、装完再打开。想先看会做什么：加 `--dry-run`；想在别处试一遍：`--root <目录>`。
 
-从早先的 EasyColab 迁移时，安装脚本会一次性把旧的 `settings.json` 复制过来，把旧目录里较新的 `colab_kernel_runners.json` 迁到新安装目录，再删掉 `%LOCALAPPDATA%\Programs\EasyColab` 里的旧兼容层（目录里只有联接、转发脚本、exe 副本时才会删，其他情况原样保留）。
-
 ### 自己打免安装包
 
 ```bash
