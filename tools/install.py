@@ -4,8 +4,7 @@ Installer for Colab-yoga.
 
 Builds the console executable, prepares the bundled Python runtime and its packages
 (downloaded and pinned, nothing is copied from another application), lays out the install
-directory, migrates the old settings once, retires the old EasyColab compatibility layer
-if one is found, manages Windows shortcuts, and closes/restarts the console GUI.
+directory, manages shortcuts, and closes/restarts the console GUI.
 
 Run it with a Python 3.10+ that has pip (python.org); that Python only runs this
 script and pip. The installed app runs on its own runtime\\python.exe.
@@ -52,10 +51,7 @@ PYTHON_MACOS_ARM64_URL = (
 )
 PYTHON_MACOS_ARM64_SHA256 = "2579c9ffcbb0a745f1de3d645612c7466269eb9a23316a54ece49d50c1c9122f"
 
-# What may sit in the old EasyColab dir when it is only the compatibility layer that an
-# earlier Colab-yoga installer made there.
-LEGACY_TOP = {"easycolab.exe", "_internal", "repo"}
-LEGACY_INTERNAL = {"runtime", "site-packages", "colab_bridge.py", "colab_kernel_runners.json"}
+
 
 
 def run_ps1(script_content: str, args: list[str] | None = None, env: dict | None = None) -> subprocess.CompletedProcess:
@@ -104,18 +100,14 @@ class InstallPaths:
                 sandbox = Path(root).resolve()
                 self.local_appdata = sandbox / "Library" / "Application Support"
                 self.target_install = sandbox / "Programs" / "Colab-yoga"
-                self.legacy_install = sandbox / "Programs" / "EasyColab"
                 self.target_config = self.local_appdata / "Colab-yoga"
-                self.legacy_config = self.local_appdata / "EasyColab"
                 self.start_menu = sandbox / "Applications"
                 self.desktop = sandbox / "Desktop"
             else:
                 base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "Library" / "Application Support")
                 self.local_appdata = Path(base)
                 self.target_install = self.local_appdata / "Programs" / "Colab-yoga"
-                self.legacy_install = self.local_appdata / "Programs" / "EasyColab"
                 self.target_config = self.local_appdata / "Colab-yoga"
-                self.legacy_config = self.local_appdata / "EasyColab"
                 self.start_menu = Path.home() / "Applications"
                 self.desktop = Path.home() / "Desktop"
             self.target_exe = self.target_install / "Colab-yoga.app"
@@ -124,18 +116,14 @@ class InstallPaths:
                 sandbox = Path(root).resolve()
                 self.local_appdata = sandbox / "AppData" / "Local"
                 self.target_install = sandbox / "Programs" / "Colab-yoga"
-                self.legacy_install = sandbox / "Programs" / "EasyColab"
                 self.target_config = self.local_appdata / "Colab-yoga"
-                self.legacy_config = self.local_appdata / "EasyColab"
                 self.start_menu = sandbox / "StartMenu"
                 self.desktop = sandbox / "Desktop"
             else:
                 base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
                 self.local_appdata = Path(base)
                 self.target_install = self.local_appdata / "Programs" / "Colab-yoga"
-                self.legacy_install = self.local_appdata / "Programs" / "EasyColab"
                 self.target_config = self.local_appdata / "Colab-yoga"
-                self.legacy_config = self.local_appdata / "EasyColab"
                 self.start_menu = Path(os.environ.get("APPDATA", "")) / "Microsoft" / "Windows" / "Start Menu" / "Programs"
                 self.desktop = desktop_folder()
             self.target_exe = self.target_install / "Colab-yoga.exe"
@@ -680,47 +668,6 @@ def layout_install_dir(paths: InstallPaths, built_exe: Path | None, dry_run: boo
         print(f"install: {msg}")
 
 
-# ─── Step (d): Migrate config once ───────────────────────────────────────────────
-
-def migrate_config(paths: InstallPaths, dry_run: bool):
-    """One-time: settings.json and keeper.json of an earlier EasyColab install are copied
-    into the Colab-yoga config dir when it has none of its own. Nothing reads the old
-    dir afterwards."""
-    if not dry_run:
-        paths.target_config.mkdir(parents=True, exist_ok=True)
-    for fname in ("settings.json", "keeper.json"):
-        src = paths.legacy_config / fname
-        dst = paths.target_config / fname
-        if src.is_file() and not dst.is_file():
-            if dry_run:
-                print(f"[dry-run] migrate config: {src} -> {dst}")
-            else:
-                shutil.copy2(src, dst)
-                print(f"config: migrated {fname} to {paths.target_config}")
-
-
-# ─── Step (e): Retire the old EasyColab compatibility layer ──────────────────────
-
-def is_junction(path: Path) -> bool:
-    """True for any reparse point (junction or symlink); os.path.isjunction needs 3.12."""
-    try:
-        attrs = os.lstat(path).st_file_attributes
-    except (OSError, AttributeError):
-        return False
-    return bool(attrs & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
-
-
-def remove_link(path: Path):
-    """Remove a junction/symlink itself. os.rmdir on a directory reparse point deletes the
-    link and never its target; rmtree must not be used on a path that may be one."""
-    if not is_junction(path):
-        raise RuntimeError(f"refusing to unlink {path}: not a link")
-    try:
-        os.rmdir(path)
-    except OSError:
-        os.unlink(path)
-
-
 def _force_rmtree(path: Path):
     def _onerror(func, p, exc_info):
         try:
@@ -731,89 +678,7 @@ def _force_rmtree(path: Path):
     shutil.rmtree(path, onerror=_onerror)
 
 
-def classify_legacy(legacy: Path) -> tuple[bool, str]:
-    """(True, "") if the dir holds nothing but the compatibility layer that earlier
-    Colab-yoga installers made: EasyColab.exe (a copy), _internal with two links to the
-    runtime and packages, the bridge forwarder and the runner scripts, and a link to the
-    repo. An original EasyColab install (real runtime and site-packages dirs, anything
-    else) is not that."""
-    for item in legacy.iterdir():
-        low = item.name.lower()
-        if low not in LEGACY_TOP:
-            return False, f"unexpected entry {item.name}"
-        if low == "repo" and not is_junction(item):
-            return False, "repo is a real directory"
-        if low == "easycolab.exe" and (item.is_dir() or is_junction(item)):
-            return False, "EasyColab.exe is not a file"
-        if low == "_internal":
-            if is_junction(item) or not item.is_dir():
-                return False, "_internal is not a plain directory"
-            for sub in item.iterdir():
-                sl = sub.name.lower()
-                if sl not in LEGACY_INTERNAL:
-                    return False, f"unexpected entry _internal/{sub.name}"
-                if sl in ("runtime", "site-packages") and not is_junction(sub):
-                    return False, f"_internal/{sub.name} is a real directory"
-    return True, ""
-
-
-def migrate_runners(src: Path, dst: Path, dry_run: bool):
-    """Keep the newer colab_kernel_runners.json (it holds API keys: never printed)."""
-    if not src.is_file():
-        return
-    if dst.is_file() and dst.stat().st_mtime >= src.stat().st_mtime:
-        print("runners: the install's colab_kernel_runners.json is current; the old copy is dropped")
-        return
-    if dry_run:
-        print(f"[dry-run] runners: would move {src} -> {dst}")
-        return
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dst)
-    if sha256_of(src) != sha256_of(dst):
-        raise RuntimeError("runners: the copy differs from the original; the old dir is kept")
-    print(f"runners: colab_kernel_runners.json ({dst.stat().st_size} bytes) moved to {dst}")
-
-
-def retire_legacy(paths: InstallPaths, dry_run: bool):
-    """Migrate the runner scripts, then delete the old Programs\\EasyColab compatibility
-    layer. Its links are unlinked first, so the real runtime and packages they point at
-    are never touched."""
-    legacy = paths.legacy_install
-    if not legacy.is_dir():
-        return
-    ok, why = classify_legacy(legacy)
-    if not ok:
-        print(f"legacy: {legacy} is not a Colab-yoga compatibility layer ({why}); left in place. "
-              "Nothing uses it any more; delete it yourself if you do not need EasyColab.")
-        return
-    new_ready = bundled_python(paths.target_install).is_file() and \
-        (paths.target_install / "site-packages" / "colab_cli").is_dir() and \
-        (paths.target_install / "bridge" / "colab_yoga_bridge.py").is_file()
-    if not new_ready and not dry_run:
-        print("legacy: the new install is not complete; the old directory is kept")
-        return
-    migrate_runners(legacy / "_internal" / "colab_kernel_runners.json",
-                    paths.target_install / "colab_kernel_runners.json", dry_run)
-    if dry_run:
-        print(f"[dry-run] legacy: would unlink its links and delete {legacy}")
-        return
-    for link in (legacy / "repo", legacy / "_internal" / "runtime", legacy / "_internal" / "site-packages"):
-        if os.path.lexists(link):
-            remove_link(link)
-    if not bundled_python(paths.target_install).is_file() or \
-            not (paths.target_install / "site-packages" / "colab_cli").is_dir():
-        raise RuntimeError("the install lost its runtime or packages while unlinking; stopping")
-    for root, dirs, files in os.walk(legacy):  # nothing left may be a link
-        for n in dirs + files:
-            if is_junction(Path(root) / n):
-                raise RuntimeError(f"{Path(root) / n} is still a link; not deleting {legacy}")
-    _force_rmtree(legacy)
-    if legacy.exists():
-        raise RuntimeError(f"could not delete {legacy} (a file in it is in use? close EasyColab.exe)")
-    print(f"legacy: removed the compatibility layer {legacy}")
-
-
-# ─── Step (f): Shortcuts ─────────────────────────────────────────────────────────
+# ─── Step (d): Shortcuts ─────────────────────────────────────────────────────────
 
 def setup_shortcuts(paths: InstallPaths, dry_run: bool):
     if not app_binary_exists(paths.target_exe) and not dry_run:
@@ -866,31 +731,9 @@ $s.Save()
             else:
                 print(f"warning: failed to create shortcut {lnk}: {res.stderr}")
 
-    # Shortcuts that point into the retired EasyColab directory would dangle.
-    ps_prune = """
-param([string]$LegacyDir, [string[]]$Dirs)
-$sh = New-Object -ComObject WScript.Shell
-foreach ($d in $Dirs) {
-    if (-not (Test-Path $d)) { continue }
-    foreach ($f in Get-ChildItem -Path $d -Filter *.lnk -File) {
-        $t = $sh.CreateShortcut($f.FullName).TargetPath
-        if ($t -and $t.StartsWith($LegacyDir, [System.StringComparison]::OrdinalIgnoreCase)) {
-            Remove-Item -Force $f.FullName
-            "removed $($f.FullName)"
-        }
-    }
-}
-"""
-    if dry_run:
-        print(f"[dry-run] shortcut: remove shortcuts pointing into {paths.legacy_install}")
-    else:
-        res = run_ps1(ps_prune, [str(paths.legacy_install), str(paths.start_menu), str(paths.desktop)])
-        for line in res.stdout.splitlines():
-            if line.strip():
-                print(f"shortcut: {line.strip()}")
 
 
-# ─── Step (g): Restart console & keeper ──────────────────────────────────────────
+# ─── Step (e): Restart console & keeper ──────────────────────────────────────────
 
 def stop_keeper(paths: InstallPaths, dry_run: bool):
     keeper_json = paths.target_config / "keeper.json"
@@ -944,9 +787,7 @@ def get_gui_pids(exe_names: list[str]) -> list[int]:
     return pids
 
 
-# EasyColab.exe is the copy the old compatibility layer kept; it must not be running when
-# that directory is deleted.
-CONSOLE_EXES = ["Colab-yoga.exe", "EasyColab.exe"]
+CONSOLE_EXES = ["Colab-yoga.exe"]
 
 
 def close_consoles(paths: InstallPaths, no_restart: bool, dry_run: bool) -> bool:
@@ -1041,13 +882,7 @@ def main(argv=None) -> int:
         quiesce()
         layout_install_dir(paths, built_exe, args.dry_run)
 
-        # (d) Migrate config once
-        migrate_config(paths, args.dry_run)
-
-        # (e) Retire the old EasyColab compatibility layer, if any
-        retire_legacy(paths, args.dry_run)
-
-        # (f) Shortcuts
+        # (d) Shortcuts
         setup_shortcuts(paths, args.dry_run)
     finally:
         if not args.check:

@@ -668,7 +668,7 @@ func (a *App) waysIn() []wayIn {
 	}
 
 	mcpText, _ := a.mcpSummary(darkPalette)
-	mcp := wayIn{title: "MCP 桥", value: a.novelRoot, actions: []action{{"打开文件夹", func() { a.openFolder(a.novelRoot) }}}}
+	mcp := wayIn{title: "MCP 桥", value: a.mcpRoot, actions: []action{{"打开文件夹", func() { a.openFolder(a.mcpRoot) }}}}
 	switch {
 	case checking:
 		mcp.state, mcp.note = "idle", "检测中…"

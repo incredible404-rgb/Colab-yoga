@@ -31,6 +31,15 @@ var shippedRunners = []fixtureRunner{
 	{"glm53-flash", "GLM-5.3-Flash-Uncensored-GSQ-RCO-Q4", []int64{138_200_000_000}, "qwen.fixture.ts.net"},
 }
 
+// fixtureDisplay is the display name, tags and note some fixture entries carry, the way an
+// exporter may write them.
+var fixtureDisplay = map[string]string{
+	"qwen38-huihui-v2": `"name":"Qwen3.8-Flash-Next (Huihui v2)","tags":["125B-A6B MoE","UD-Q4_K_XL","视觉","MTP"],"note":"默认主力 · 104 tok/s",`,
+	"gemma4-31b":       `"name":"Gemma-4-31B (ARA Heretic Q8_0)","tags":["31B 稠密","Q8_0","视觉","MTP"],"note":"约 1/3 显存，加载最快",`,
+	"qwen38-27b-rvn":   `"name":"Qwen3.8-27B (RVN Heretic BF16)","tags":["27B 稠密","BF16","视觉","MTP"],"note":"原精度双重 ARA 破限",`,
+	"glm53-flash":      `"name":"GLM-5.3-Flash (320B-A18B)","tags":["320B-A18B MoE","GSQ-RCO-Q4","视觉","部分专家放内存"],"note":"最大的一个",`,
+}
+
 // writeRunners writes a runners file with the entries in this order and returns its path.
 func writeRunners(t *testing.T, dir string, runners []fixtureRunner) string {
 	t.Helper()
@@ -44,8 +53,8 @@ func writeRunners(t *testing.T, dir string, runners []fixtureRunner) string {
 		if r.FQDN != "" {
 			code = fmt.Sprintf("SERVICE_FQDN = \\\"%s\\\"\\n", r.FQDN) + code
 		}
-		parts = append(parts, fmt.Sprintf(`%q:{"slug":%q,"alias":%q,"title":"t","root_dir":"/x","min_vram_mib":1,"files":[%s],"code":"%s"}`,
-			r.ID, r.ID, r.Alias, strings.Join(files, ","), code))
+		parts = append(parts, fmt.Sprintf(`%q:{"slug":%q,"alias":%q,"title":"t",%s"root_dir":"/x","min_vram_mib":1,"files":[%s],"code":"%s"}`,
+			r.ID, r.ID, r.Alias, fixtureDisplay[r.ID], strings.Join(files, ","), code))
 	}
 	path := filepath.Join(dir, "colab_kernel_runners.json")
 	if err := os.WriteFile(path, []byte("{"+strings.Join(parts, ",")+"}"), 0o644); err != nil {
@@ -54,7 +63,7 @@ func writeRunners(t *testing.T, dir string, runners []fixtureRunner) string {
 	return path
 }
 
-func TestCatalogFollowsTheRunnersFileInOrderWithKnownNames(t *testing.T) {
+func TestCatalogFollowsTheRunnersFileInOrderWithItsNames(t *testing.T) {
 	path := writeRunners(t, t.TempDir(), shippedRunners)
 	runners, err := readRunners(path)
 	if err != nil {
@@ -66,7 +75,7 @@ func TestCatalogFollowsTheRunnersFileInOrderWithKnownNames(t *testing.T) {
 	}
 	m := cat[0]
 	if m.Name != "Qwen3.8-Flash-Next (Huihui v2)" || m.Alias != shippedRunners[0].Alias || len(m.Tags) == 0 || m.Note == "" {
-		t.Errorf("a known model keeps its curated name and tags, with the file's alias: %+v", m)
+		t.Errorf("a model shows the name, tags and note of its entry, with the file's alias: %+v", m)
 	}
 	if m.SizeGB < 114.99 || m.SizeGB > 115.01 {
 		t.Errorf("size is the sum of the files: %v", m.SizeGB)

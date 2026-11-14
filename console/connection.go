@@ -136,13 +136,13 @@ func (a *App) urlsCard(c *ui.Context, p Palette) {
 		}
 		field("Tailscale Service 地址", "ts", "http://qwen.<tailnet>.ts.net:443", &a.tsURL)
 		field("本机 MCP 桥", "mcp", "http://127.0.0.1:3426", &a.mcpURL)
-		field("工作目录", "root", `C:\Users\…\Documents\Colab创作`, &a.novelRoot)
+		field("工作目录", "root", `C:\Users\…\Documents`, &a.mcpRoot)
 		ui.Row(c).Gap(8).Children(func() {
 			outlineButton(c.Key("save-urls"), p, "保存").OnClick(func() {
 				a.saveAccessURLs()
 				a.flash("已保存接入地址")
 			})
-			outlineButton(c.Key("open-root"), p, "打开工作目录").OnClick(func() { a.openFolder(a.novelRoot) })
+			outlineButton(c.Key("open-root"), p, "打开工作目录").OnClick(func() { a.openFolder(a.mcpRoot) })
 		})
 	})
 }

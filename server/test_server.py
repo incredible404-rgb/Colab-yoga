@@ -375,10 +375,13 @@ class BoundStatusTestCase(unittest.TestCase):
         self.addCleanup(setattr, srv, "API_TOKEN", "")
         self.client = TestClient(srv.create_app(), headers={"Authorization": "Bearer " + TEST_TOKEN})
 
-    def write_models(self, aliases):
-        """The runners file with one runner per slug -> alias (no scripts worth running)."""
+    def write_models(self, aliases, names=None):
+        """The runners file with one runner per slug -> alias (no scripts worth running);
+        `names` gives some of them a display name."""
         runners = {slug: {"slug": slug, "alias": alias, "root_dir": "/tmp/" + slug, "code": "pass"}
                    for slug, alias in aliases.items()}
+        for slug, name in (names or {}).items():
+            runners[slug]["name"] = name
         with open(self.models_path, "w", encoding="utf-8", newline="\n") as f:
             json.dump(runners, f)
         srv.reset_status_caches()
@@ -1485,11 +1488,11 @@ class RunnerRegistryTest(BoundStatusTestCase):
             srv.reset_status_caches()
 
     def test_a_model_the_user_added_is_found_by_its_alias(self):
-        self.write_models({**SHIPPED_ALIASES, "my-70b": "My-70B-Q5"})
+        self.write_models({**SHIPPED_ALIASES, "my-70b": "My-70B-Q5"}, names={"gemma4-31b": "Gemma-4-31B (Q8_0)"})
         got = self.probe("My-70B-Q5")
         self.assertEqual((got["model_id"], got["served_alias"]), ("my-70b", "My-70B-Q5"))
-        self.assertEqual(srv.model_display_name("my-70b"), "My-70B-Q5")  # no curated name: alias
-        self.assertEqual(srv.model_display_name("gemma4-31b"), "Gemma-4-31B (ARA Heretic Q8_0)")
+        self.assertEqual(srv.model_display_name("my-70b"), "My-70B-Q5")  # the entry has no name: alias
+        self.assertEqual(srv.model_display_name("gemma4-31b"), "Gemma-4-31B (Q8_0)")  # the entry's own name
 
     def test_an_unknown_alias_is_not_guessed_and_not_taken_for_running(self):
         got = self.probe("Totally-Other-Model")

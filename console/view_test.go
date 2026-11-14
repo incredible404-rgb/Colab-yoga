@@ -27,7 +27,7 @@ func fakeApp(t *testing.T) *App {
 	clock := time.Now()
 	a.now = func() time.Time { return clock }
 	a.tsURL = "http://qwen.example.ts.net:443"
-	a.novelRoot = `C:\Users\example\Documents\Colab创作`
+	a.mcpRoot = `C:\Users\example\Documents\Work`
 	a.serverURL = "https://abcdef.gradio.invalid"
 	a.acct = Account{Known: true, LoggedIn: true, Email: "someone@gmail.com", Balance: 2795.70, Burn: 10.05,
 		Active: 1, Endpoint: "gpu-g4-s-asso1c0-3i88lxeiohgl5", Accel: "G4"}
@@ -643,17 +643,10 @@ func TestOptionalMCPStaysQuietUntilATunnelOrAManualStartAsksForIt(t *testing.T) 
 	}
 }
 
-func TestDefaultNovelRootFollowsTheLocalMCPConfigThenDocuments(t *testing.T) {
+func TestDefaultMcpRootFollowsTheLocalMCPConfigThenDocuments(t *testing.T) {
 	home := t.TempDir()
-	if got := defaultNovelRoot(home); got != filepath.Join(home, "Documents") {
-		t.Errorf("no Colab创作 folder: %q", got)
-	}
-	novel := filepath.Join(home, "Documents", "Colab创作")
-	if err := os.MkdirAll(novel, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if got := defaultNovelRoot(home); got != novel {
-		t.Errorf("Colab创作 exists: %q", got)
+	if got := defaultMcpRoot(home); got != filepath.Join(home, "Documents") {
+		t.Errorf("without a local MCP config: %q", got)
 	}
 	cfg := filepath.Join(home, ".config", "colab-cli", "local-mcp.json")
 	if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
@@ -662,7 +655,7 @@ func TestDefaultNovelRootFollowsTheLocalMCPConfigThenDocuments(t *testing.T) {
 	if err := os.WriteFile(cfg, []byte(`{"cwd": "D:\\Writing"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := defaultNovelRoot(home); got != `D:\Writing` {
+	if got := defaultMcpRoot(home); got != `D:\Writing` {
 		t.Errorf("the local MCP's cwd comes first: %q", got)
 	}
 }

@@ -10,6 +10,10 @@ Issues and pull requests are welcome. This is a small project with one maintaine
 
 Open an issue first and say what you want to change. A new platform, a new dependency or a change to the bridge commands and the server API is easier to agree on before the code exists.
 
+### What belongs here
+
+Colab-yoga manages a Colab GPU runtime for any model exported to it. It knows no particular model, prompt or folder: the model list, with its display names and tags, is whatever the runners file holds. One person's setup (their models, working folders, presets, migration paths for their own old installs) stays out of the code; settings and the runners file are where it goes. `bridge/test_generic_repo.py` fails when a known personal marker comes back.
+
 ### Set up and check
 
 Prerequisites are in the README under "Install from source" (Go, and a Python 3.10+ on Windows; Go on macOS).
@@ -50,6 +54,10 @@ Contributions are licensed under Apache License 2.0, the license of this reposit
 ### 改动较大时
 
 先开 issue 说明想改什么。新增平台、新增依赖、改 bridge 命令或 server API，这类事在写代码之前对齐更省事。
+
+### 什么该进这个仓库
+
+Colab-yoga 管理一台 Colab GPU 运行时，对导出给它的任何模型一视同仁。它不认识具体的模型、提示词或目录：模型列表连同显示名和标签，都来自 runners 文件。某一个人的环境（他的模型、工作目录、预设、他自己旧安装的迁移路径）不进代码，放在设置项和 runners 文件里。已知的个人化标记再出现时，`bridge/test_generic_repo.py` 会失败。
 
 ### 环境与检查
 
