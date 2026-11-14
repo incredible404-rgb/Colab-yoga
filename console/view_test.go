@@ -405,6 +405,8 @@ func TestSnapshots(t *testing.T) {
 		{"state7_keep_warning_dark_1024", 1024, 640, stateKeepWarning},
 		{"state1_idle_dark_1440", 1440, 900, stateIdle},
 		{"state2_waking_dark_1440", 1440, 900, stateWaking},
+		{"update_dark_1024", 1024, 640, func(a *App) { a.updateTag = "v0.6.0" }},
+		{"update_light_1024", 1024, 640, func(a *App) { a.updateTag = "v0.6.0"; a.themeName = "light" }},
 		{"signin_dark_1024", 1024, 640, func(a *App) { stateIdle(a); a.acct.LoggedIn = false }},
 		{"signin_light_1024", 1024, 640, func(a *App) { stateIdle(a); a.acct.LoggedIn = false; a.themeName = "light" }},
 		{"signin_code_dark_1024", 1024, 640, func(a *App) { stateIdle(a); a.acct.LoggedIn = false; a.binding = true }},

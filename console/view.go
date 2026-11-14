@@ -401,9 +401,12 @@ func (a *App) keepButton(c *ui.Context, p Palette) {
 func (a *App) nav(c *ui.Context, p Palette) {
 	ui.Column(c).Fill().Background(p.Panel).Children(func() {
 		a.navList(c, p)
-		ui.Row(c).Padding(10, 14, 12, 14).Gap(8).AlignItems(ui.Center).BorderWidth(1, 0, 0, 0).BorderColor(p.Border).Children(func() {
-			a.accountChip(c, p)
-			a.themeButton(c, p)
+		ui.Column(c).Padding(10, 14, 12, 14).Gap(8).BorderWidth(1, 0, 0, 0).BorderColor(p.Border).Children(func() {
+			a.updateRow(c, p)
+			ui.Row(c).Gap(8).AlignItems(ui.Center).FillWidth().Children(func() {
+				a.accountChip(c, p)
+				a.themeButton(c, p)
+			})
 		})
 	})
 }
@@ -427,6 +430,31 @@ func (a *App) navList(c *ui.Context, p Palette) {
 			ui.Text(c.Key("no-models"), noModelsHint).FontSize(12).TextColor(p.Text3).Margin(0, 4, 6, 4)
 		}
 	})
+}
+
+// updateRow announces a release newer than this build, above the account: one quiet row
+// that opens the release page. It is not there at all when the build is current.
+func (a *App) updateRow(c *ui.Context, p Palette) {
+	if a.updateTag == "" {
+		return
+	}
+	row := ui.ButtonBase(c.Key("update")).FillWidth().Padding(8, 10).Radius(10).
+		Cursor(ui.CursorPointer).Label("新版本 " + strings.TrimPrefix(a.updateTag, "v") + "，查看更新说明").
+		Tooltip("在浏览器里打开发布页；下载和替换由你自己完成")
+	bg, border := ui.Transparent, p.Border
+	if row.Hovered() {
+		bg, border = p.Raised.Alpha(0.55), p.BorderStrong
+	}
+	row.Background(bg).Border(1, border).Transition(colorMotion).Children(func() {
+		ui.Row(c).Gap(8).AlignItems(ui.Center).FillWidth().Children(func() {
+			dot(c, p.Accent, 8)
+			ui.Text(c, "新版本 "+strings.TrimPrefix(a.updateTag, "v")).FontSize(13).TextColor(p.Text).SingleLine().Grow(1).Shrink(1).MinWidth(30)
+			ui.Text(c, "查看").FontSize(12).TextColor(p.Text3).SingleLine()
+		})
+	})
+	if row.Clicked() {
+		a.openUpdate()
+	}
 }
 
 // accountChip is who is signed in. Binding is done once, so the account takes one quiet

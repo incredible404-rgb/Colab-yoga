@@ -55,6 +55,8 @@
 3. 设置和状态保存在 `%LOCALAPPDATA%\Colab-yoga`（Windows）或 `~/Library/Application Support/Colab-yoga`（macOS），不在解压目录里。免安装包不建快捷方式、不写注册表，删掉文件夹即卸载。
 4. 模型清单 `colab_kernel_runners.json`（colab-gpu-llm-service 的 `colab_kernel.py` 导出，含 API 密钥）和本机 MCP 配置 `local_mcp_bridge.json` 默认都写到上述配置目录，管理台从那里自动读取，所以免安装包放在任意目录都不用手动拷文件；放在可执行程序旁边的同名文件优先。包里不带这两个文件；没有模型清单时，模型列表为空并提示如何导出。
 
+**更新提示。** 管理台每天最多向 GitHub 询问一次最新发布的版本号；有新版本时，左下角账号上方会出现一行「新版本 x.y.z」，点开是该版本的发布页。它只提示，不会自己下载或替换任何文件：下载新包、解压覆盖由你来做，设置和状态不受影响。不想让它联网询问，在 `settings.json` 里加 `"updateCheck": "off"`。
+
 ### 方式二：从源码安装
 
 - **Windows 10/11 x64**：[Go](https://go.dev/dl/) 1.27+；[PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell-on-windows)（`pwsh`，建快捷方式和管理进程用）；[python.org](https://www.python.org/downloads/windows/) 的 Python 3.10+（带 pip，只用来跑安装脚本和 pip；管理台运行时用的 3.12 由安装脚本另外下载）。
