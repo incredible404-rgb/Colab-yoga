@@ -18,7 +18,7 @@ body:
     id: version
     attributes:
       label: Colab-yoga version / 版本
-      placeholder: "0.5.3, portable zip or installed from source"
+      placeholder: "0.6.0, portable zip or installed from source"
     validations:
       required: true
   - type: dropdown
