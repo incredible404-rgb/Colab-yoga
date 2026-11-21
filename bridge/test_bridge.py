@@ -31,7 +31,10 @@ except ImportError:
         sys.path.insert(0, candidate)
 
 import colab_yoga_bridge as cb
+from test_auth_failures import MemoryTokenStore, isolate_token_store
 
+# No test may touch the real keyring entry or ~/.config/colab-cli/token.json.
+isolate_token_store()
 # No test may touch the real %LOCALAPPDATA%\Colab-yoga\ledger.json; tests that read it patch their own.
 _LEDGER_SANDBOX = Path(tempfile.mkdtemp()) / "ledger.json"
 cb.ledger_state_path = lambda: str(_LEDGER_SANDBOX)
@@ -564,37 +567,34 @@ class AuthStatusTests(unittest.TestCase):
 
 
 class AccountEmailCredsReuseTests(unittest.TestCase):
-    def test_email_comes_from_the_creds_just_checked_without_reloading_the_token_file(self) -> None:
+    def test_email_comes_from_the_creds_just_checked_without_reloading_the_token(self) -> None:
         tmp = Path(tempfile.mkdtemp())
-        token, profile = tmp / "token.json", tmp / "account_profile.json"
-        token.write_bytes(b"{}")
+        profile = tmp / "account_profile.json"
         creds = types.SimpleNamespace(valid=True, expired=False, refresh_token="r" * 30, token="t")
         profile.write_bytes(json.dumps({"fp": ("r" * 30)[-20:], "email": "cached@example.com"}).encode())
-        saved = (cb.TOKEN_CONFIG_PATH, cb.ACCOUNT_PROFILE_CACHE_PATH, cb._CHECKED_CREDS, cb.Credentials)
-        boom = types.SimpleNamespace(from_authorized_user_file=lambda *a: (_ for _ in ()).throw(AssertionError("reloaded")))
+        saved = (cb.TOKEN_STORE, cb.ACCOUNT_PROFILE_CACHE_PATH, cb._CHECKED_CREDS, cb.Credentials)
+        boom = types.SimpleNamespace(from_authorized_user_info=lambda *a: (_ for _ in ()).throw(AssertionError("reloaded")))
         try:
-            cb.TOKEN_CONFIG_PATH, cb.ACCOUNT_PROFILE_CACHE_PATH = str(token), str(profile)
+            cb.TOKEN_STORE, cb.ACCOUNT_PROFILE_CACHE_PATH = MemoryTokenStore("{}"), str(profile)
             cb._CHECKED_CREDS, cb.Credentials = creds, boom
             self.assertEqual(cb._get_account_email(), "cached@example.com")
         finally:
-            cb.TOKEN_CONFIG_PATH, cb.ACCOUNT_PROFILE_CACHE_PATH, cb._CHECKED_CREDS, cb.Credentials = saved
+            cb.TOKEN_STORE, cb.ACCOUNT_PROFILE_CACHE_PATH, cb._CHECKED_CREDS, cb.Credentials = saved
 
     def test_has_valid_token_remembers_what_it_validated(self) -> None:
-        tmp = Path(tempfile.mkdtemp())
-        token = tmp / "token.json"
-        token.write_bytes(b"{}")
+        token = MemoryTokenStore("{}")
         creds = types.SimpleNamespace(valid=True, expired=False, refresh_token="r")
-        fake_creds_cls = types.SimpleNamespace(from_authorized_user_file=lambda *a: creds)
-        saved = (cb.TOKEN_CONFIG_PATH, cb.Credentials, cb._CHECKED_CREDS)
+        fake_creds_cls = types.SimpleNamespace(from_authorized_user_info=lambda *a: creds)
+        saved = (cb.TOKEN_STORE, cb.Credentials, cb._CHECKED_CREDS)
         try:
-            cb.TOKEN_CONFIG_PATH, cb.Credentials = str(token), fake_creds_cls
+            cb.TOKEN_STORE, cb.Credentials = token, fake_creds_cls
             self.assertTrue(cb._has_valid_token())
             self.assertIs(cb._CHECKED_CREDS, creds)
-            token.unlink()
+            token.delete()
             self.assertFalse(cb._has_valid_token())
             self.assertIsNone(cb._CHECKED_CREDS)
         finally:
-            cb.TOKEN_CONFIG_PATH, cb.Credentials, cb._CHECKED_CREDS = saved
+            cb.TOKEN_STORE, cb.Credentials, cb._CHECKED_CREDS = saved
 
 
 class LazyImportTests(unittest.TestCase):
@@ -1255,7 +1255,8 @@ class AuthCodeSessionStoreTests(unittest.TestCase):
 
         patch(cb, "_load_client_config", lambda: {})
         patch(cb, "InstalledAppFlow", flow_cls)
-        patch(cb, "TOKEN_CONFIG_PATH", str(self.tmp / "token.json"))
+        self.token = MemoryTokenStore()
+        patch(cb, "TOKEN_STORE", self.token)
         patch(cb, "PKCE_VERIFIER_PATH", str(self.tmp / "pkce.txt"))
         patch(cb, "ACCOUNT_PROFILE_CACHE_PATH", str(self.tmp / "profile.json"))
         patch(cb, "_get_account_email", lambda: self.emails.pop(0))
@@ -1289,7 +1290,7 @@ class AuthCodeSessionStoreTests(unittest.TestCase):
         self.emails = [old, new]
         with contextlib.redirect_stdout(io.StringIO()):
             cb.cmd_auth_code("the-code")
-        self.assertTrue((self.tmp / "token.json").exists())  # the new token is saved either way
+        self.assertEqual(self.token.raw, "{}")  # the new token is saved either way
 
     def test_same_account_keeps_the_named_sessions(self) -> None:
         self._bind("me@example.com", "Me@Example.com")

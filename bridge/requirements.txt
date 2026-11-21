@@ -1,6 +1,8 @@
 # Pinned dependency lock for the bridge's bundled site-packages (CPython 3.12, win_amd64 + macosx_arm64).
 # Top level: google-colab-cli (imports colab_cli, requests, google-auth, google-auth-oauthlib);
-# the rest is its resolved closure. Every wheel is hash-pinned.
+# the rest is its resolved closure. Every wheel is hash-pinned. Left out on purpose because the
+# bridge never imports them: pyarrow (jupyter-mimetypes) and colorama (typer's Windows output).
+# pywin32-ctypes is keyring's Windows backend; it is pure Python and also lands on macOS, unused.
 # tools/install.py installs it into site-packages with pip's --target, --platform,
 # --python-version 3.12, --only-binary=:all:, --no-deps and --require-hashes.
 # To bump: change the pins, regenerate the hashes (pip download, then sha256 of each wheel),
@@ -33,12 +35,18 @@ google-auth==2.62.1 \
     --hash=sha256:015399a5abde39033c69404cc1c079e6d4c2de2993e164c9f4eac6e5376ad72b
 google-auth-oauthlib==1.5.0 \
     --hash=sha256:71625fdea21c6c03217eb9ff13741c3096e6d257ebca0ad084dbd6e9f4aa4ef4
-google-colab-cli==0.7.5 \
-    --hash=sha256:2b303ed21ebd6da829f80d506224a6cd4f0e62d506fb373166d06a0532e516a9
+google-colab-cli==0.8.0 \
+    --hash=sha256:5e623d0b34e6efa84ea81571d0cec60099e06aebe7ea345ec62f53e810da2ec1
 html2text==2025.4.15 \
     --hash=sha256:00569167ffdab3d7767a4cdf589b7f57e777a5ed28d12907d8c58769ec734acc
 idna==3.20 \
     --hash=sha256:ab7ae7122974553370f0bdb919e1a960b2cd1bc1ef0276416d896db81c14582c
+jaraco-classes==3.4.0 \
+    --hash=sha256:f662826b6bed8cace05e7ff873ce0f9283b5c924470fe664fff1c2f00f581790
+jaraco-context==6.1.2 \
+    --hash=sha256:bf8150b79a2d5d91ae48629d8b427a8f7ba0e1097dd6202a9059f29a36379535
+jaraco-functools==4.6.0 \
+    --hash=sha256:99e3dc0060c5cbe8fcd1cdb36258e2a65ca40f1566b2033b12abb1bb44dd3c30
 jsonschema==4.26.0 \
     --hash=sha256:d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce
 jsonschema-specifications==2025.9.1 \
@@ -51,10 +59,14 @@ jupyter-kernel-client==0.9.0 \
     --hash=sha256:77acb8f2f738d97625d6bd01ee8cf21c4d59790b7ba464108712db3870416f20
 jupyter-mimetypes==0.2.0 \
     --hash=sha256:e6dcd989258e3fc944365b656d9173191517e0e393bd878e97ce500e5b388527
+keyring==25.7.0 \
+    --hash=sha256:be4a0b195f149690c166e850609a477c532ddbfbaed96a404d4e43f8d5e2689f
 markdown-it-py==4.2.0 \
     --hash=sha256:9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a
 mdurl==0.1.2 \
     --hash=sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8
+more-itertools==11.2.1 \
+    --hash=sha256:35a7377edd1dd6608dcb2cdf534ded55ea32d49448875ad042cd3f879fb1ded0
 nbformat==5.11.1 \
     --hash=sha256:cc6698fa75f4fab8755ead786317815f13a6fee3b53311c0abb1a8b51d52f7ec
 oauthlib==4.0.1 \
@@ -80,6 +92,8 @@ pygments==2.21.0 \
     --hash=sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9
 python-dateutil==4.0.0 \
     --hash=sha256:a5e246f79eb80475e691bf93862cead98decd8a498cf53ba0516fcdc0f50dc1c
+pywin32-ctypes==0.2.3 \
+    --hash=sha256:8a1513379d709975552d202d942d9837758905c8d01eb82b8bcc30918929e7b8
 pyzmq==27.3.0 \
     --hash=sha256:3ea8e8fa5c097e68fef91d70b150fda96f307758103868018fc4deeb9c214122 \
     --hash=sha256:15155fd8f308d3bd47f67a8f6cc809f9db90abbf63c514c384a17622e2cf080f
