@@ -123,8 +123,11 @@ enough; it is not a defence against the tunnel operator, who relays the traffic.
 - The Colab session name in `~/.config/colab-cli/sessions.json` is `easycolab`, shared with
   `colab_cli.py` (which also accepts `colab-yoga`). It is an internal identifier, not a path,
   and renaming it would orphan a live runtime's session, so it is kept on purpose.
-- The Google token `~/.config/colab-cli/token.json` and `sessions.json` are shared with
-  colab-gpu-llm-service. `auth_code` compares the new account's email with the previous
+- The Google token and `sessions.json` are shared with colab-gpu-llm-service. The token is
+  colab-cli's own OS keyring entry (Windows Credential Manager, macOS Keychain; colab-cli 0.7.6
+  and later), read and written through `TokenStore` in the bridge; a `token.json` left by
+  0.7.5 is moved in on first read and deleted. Everything the two projects share is listed in
+  [integration.md](integration.md). `auth_code` compares the new account's email with the previous
   one (read with the old token, else from the remembered profile in `account_profile.json`,
   because an old token that can no longer refresh is the usual reason to rebind). The same
   account again leaves the running sessions alone; for another or an unidentifiable account

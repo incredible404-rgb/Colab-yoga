@@ -471,10 +471,15 @@ func (a *App) submitAuthCode() {
 
 func (a *App) logout() {
 	a.once("auth_logout", func() {
-		_, err := a.bridge.RunJSON(60*time.Second, "auth_logout")
+		m, err := a.bridge.RunJSON(60*time.Second, "auth_logout")
 		a.apply(func() {
 			if err != nil {
 				a.flash("退出账号失败：" + shortErr(err))
+				return
+			}
+			if ok, _ := m["ok"].(bool); !ok {
+				msg, _ := m["error"].(string)
+				a.flash("退出账号失败：" + msg)
 				return
 			}
 			a.flash("已退出 Google 账号")

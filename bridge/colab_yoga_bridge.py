@@ -50,7 +50,11 @@ def _ensure_utf8_stdio():
 
 _ensure_utf8_stdio()
 
-from colab_cli.auth import PUBLIC_SCOPES, TOKEN_CONFIG_PATH, REMOTE_REDIRECT_URI
+import keyring
+from keyring.errors import KeyringError, PasswordDeleteError
+
+from colab_cli import auth as _cli_auth
+from colab_cli.auth import PUBLIC_SCOPES, REMOTE_REDIRECT_URI
 from colab_cli.common import state
 from colab_cli.client import (
     Accelerator,
@@ -101,6 +105,88 @@ def _load_client_config() -> dict:
     return json.loads(res.read_text(encoding="utf-8"))
 
 
+class TokenStore:
+    """The Google OAuth token, shared with the colab CLI and colab-gpu-llm-service: the CLI's
+    own OS keyring entry (Windows Credential Manager, macOS Keychain) since colab-cli 0.7.6.
+    A token.json left by colab-cli 0.7.5 or older is moved into the keyring on first read,
+    as the CLI itself does, and deleted once that write succeeded; if the write fails the file
+    is kept and still used. A keyring entry that is not JSON gives way to a usable file.
+    Raises KeyringError (every backend failure, whatever type the backend used) or OSError
+    when the store cannot be read, ValueError when nothing saved can be parsed."""
+
+    service = _cli_auth.KEYRING_SERVICE_NAME
+    username = _cli_auth.KEYRING_USERNAME
+    legacy_path = _cli_auth.LEGACY_TOKEN_PATH
+
+    @staticmethod
+    def _call(func, *args):
+        # The Windows backend re-raises Credential Manager failures (e.g. 1312, no logon session
+        # over SSH) as win32ctypes' pywintypes.error, which is neither KeyringError nor OSError.
+        try:
+            return func(*args)
+        except KeyringError:
+            raise
+        except Exception as err:
+            raise KeyringError("%s: %s" % (type(err).__name__, err)) from err
+
+    def read(self):
+        raw = self._call(keyring.get_password, self.service, self.username)
+        has_legacy = os.path.exists(self.legacy_path)
+        if raw:
+            try:
+                json.loads(raw)
+            except ValueError:
+                if not has_legacy:
+                    raise
+            else:
+                self._remove_legacy()
+                return raw
+        if not has_legacy:
+            return None
+        with open(self.legacy_path, "r", encoding="utf-8") as f:
+            raw = f.read()
+        json.loads(raw)  # a corrupt file stays where it is (ValueError: offer rebinding)
+        try:
+            self._call(keyring.set_password, self.service, self.username, raw)
+        except KeyringError:
+            return raw
+        self._remove_legacy()
+        return raw
+
+    def write(self, raw: str) -> None:
+        self._call(keyring.set_password, self.service, self.username, raw)
+        self._remove_legacy()
+
+    def delete(self) -> None:
+        try:
+            self._call(keyring.delete_password, self.service, self.username)
+        except PasswordDeleteError:
+            # The macOS backend raises this for any Keychain failure, not only "not found".
+            if self._call(keyring.get_password, self.service, self.username) is not None:
+                raise
+        self._remove_legacy()
+
+    def _remove_legacy(self) -> None:
+        # Best effort, as in colab-cli: a stale file the keyring already supersedes must not
+        # turn a successful keyring write into an error.
+        try:
+            os.remove(self.legacy_path)
+        except OSError:
+            pass
+
+
+TOKEN_STORE = TokenStore()
+
+
+def _load_saved_creds():
+    """The saved Credentials, or None when no account is bound. ValueError for a token that
+    cannot be parsed; KeyringError / OSError when the store cannot be read."""
+    raw = TOKEN_STORE.read()
+    if not raw:
+        return None
+    return Credentials.from_authorized_user_info(json.loads(raw), PUBLIC_SCOPES)
+
+
 _CHECKED_CREDS = None  # what _has_valid_token just validated or refreshed, for the same process to reuse
 AUTH_REFRESH_ATTEMPTS = 3
 AUTH_REFRESH_TIMEOUT_S = 5
@@ -125,15 +211,15 @@ def _auth_unavailable(err: AuthUnavailableError) -> None:
 def _has_valid_token() -> bool:
     global _CHECKED_CREDS
     _CHECKED_CREDS = None
-    if not os.path.exists(TOKEN_CONFIG_PATH):
-        return False
     try:
-        creds = Credentials.from_authorized_user_file(TOKEN_CONFIG_PATH, PUBLIC_SCOPES)
+        creds = _load_saved_creds()
     except ValueError as err:
         raise AuthUnavailableError("本地 Google 凭据格式无效，请重新绑定账号", reauth_required=True) from err
-    except OSError as err:
+    except (KeyringError, OSError) as err:
         raise AuthUnavailableError("无法读取本地 Google 凭据，请稍后重试；现有登录状态保留") from err
-    if creds and creds.valid:
+    if creds is None:
+        return False
+    if creds.valid:
         _CHECKED_CREDS = creds
         return True
     if not (creds and creds.expired and creds.refresh_token):
@@ -158,10 +244,9 @@ def _has_valid_token() -> bool:
             reauth_required = details.get("error") in ("invalid_client", "unauthorized_client")
             raise AuthUnavailableError(message, retryable=retryable, reauth_required=reauth_required) from err
     try:
-        with open(TOKEN_CONFIG_PATH, "w", encoding="utf-8") as f:
-            f.write(creds.to_json())
-    except OSError as err:
-        raise AuthUnavailableError("无法保存 Google 凭据，请检查本地文件权限；现有登录状态保留") from err
+        TOKEN_STORE.write(creds.to_json())
+    except (KeyringError, OSError) as err:
+        raise AuthUnavailableError("无法保存 Google 凭据到系统凭据库；现有登录状态保留") from err
     _CHECKED_CREDS = creds
     return True
 
@@ -185,16 +270,15 @@ def _clear_local_session_store():
 
 def _get_account_email() -> str:
     """Get currently bound Google account email (cached by refresh_token fingerprint)."""
-    if not os.path.exists(TOKEN_CONFIG_PATH):
-        return ""
     try:
         creds = _CHECKED_CREDS
         if creds is None or not creds.valid:
-            creds = Credentials.from_authorized_user_file(TOKEN_CONFIG_PATH, PUBLIC_SCOPES)
-        if creds and creds.expired and creds.refresh_token:
+            creds = _load_saved_creds()
+        if creds is None:
+            return ""
+        if creds.expired and creds.refresh_token:
             creds.refresh(Request())
-            with open(TOKEN_CONFIG_PATH, "w", encoding="utf-8") as f:
-                f.write(creds.to_json())
+            TOKEN_STORE.write(creds.to_json())
         tok_fp = (creds.refresh_token or creds.token or "")[-20:]
         if tok_fp and os.path.exists(ACCOUNT_PROFILE_CACHE_PATH):
             try:
@@ -287,7 +371,7 @@ def cmd_auth_code(code: str):
                 flow.code_verifier = f.read().strip()
         flow.fetch_token(code=code.strip())
         creds = flow.credentials
-        # The token file still holds the previous account; if it cannot be used, fall back
+        # The token store still holds the previous account; if it cannot be used, fall back
         # to the email remembered for it, before that cache is removed below.
         old_email = _get_account_email() or _cached_account_email()
         for p in (ACCOUNT_PROFILE_CACHE_PATH, PKCE_VERIFIER_PATH):
@@ -296,9 +380,7 @@ def cmd_auth_code(code: str):
                     os.remove(p)
                 except Exception:
                     pass
-        os.makedirs(os.path.dirname(TOKEN_CONFIG_PATH), exist_ok=True)
-        with open(TOKEN_CONFIG_PATH, "w", encoding="utf-8") as f:
-            f.write(creds.to_json())
+        TOKEN_STORE.write(creds.to_json())
         _CHECKED_CREDS = None
         new_email = _get_account_email()
         if _same_account(old_email, new_email):
@@ -311,8 +393,14 @@ def cmd_auth_code(code: str):
 
 
 def cmd_auth_logout():
+    try:
+        TOKEN_STORE.delete()
+    except (KeyringError, OSError) as e:
+        # Still signed in: keep the named sessions colab-gpu-llm-service may be using.
+        print(json.dumps({"ok": False, "error": "无法从系统凭据库删除 Google 凭据，仍保持登录：%s" % type(e).__name__}))
+        return
     _clear_local_session_store()
-    for p in (TOKEN_CONFIG_PATH, PKCE_VERIFIER_PATH, ACCOUNT_PROFILE_CACHE_PATH):
+    for p in (PKCE_VERIFIER_PATH, ACCOUNT_PROFILE_CACHE_PATH):
         if os.path.exists(p):
             try:
                 os.remove(p)
